@@ -1,0 +1,9 @@
+llm:
+  provider: ollama
+  model: gemma3:4b
+
+stt:
+  model: small
+
+tts:
+  voice: models/piper/voices/en_US-amy-medium.onnx
