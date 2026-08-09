@@ -1,5 +1,6 @@
 from app.llm.ollama_client import LLM
 from app.llm.prompts import SYSTEM_PROMPT, OPENING_MESSAGE
+from app.llm.knowledge_prompts import EMPLOYEE_ID_PROMPT
 from app.knowledge_base import KnowledgeBase
 
 REJECTION_PHRASES = {
@@ -32,6 +33,23 @@ SPECIALIST_PHRASES = {
     "arrange a call"
 }
 
+SPECIALIST_YES_PHRASES = {
+    "yes",
+    "yeah",
+    "yep",
+    "sure",
+    "okay",
+    "ok",
+    "fine",
+    "alright",
+    "yes sure",
+    "yeah sure",
+    "yes please",
+    "sure thing",
+    "absolutely",
+    "of course",
+}
+
 
 class ChatSession:
 
@@ -44,6 +62,7 @@ class ChatSession:
         self.call_started = False
         self.waiting_for_callback_time = False
         self.waiting_for_specialist_details = False
+        from app.llm.knowledge_prompts import EMPLOYEE_ID_PROMPT
 
         self.messages = [
             {
@@ -122,7 +141,7 @@ class ChatSession:
                 return (
                     "No problem, thank you for your time!"
                 )
-            #callback time
+        #callback time
         if self.waiting_for_callback_time:
             self.waiting_for_callback_time = False
             self.waiting_for_specialist_details = False
@@ -153,6 +172,7 @@ class ChatSession:
             {
         "role": "system",
         "content": f"""
+        {EMPLOYEE_ID_PROMPT}
         Here is verified information about Smart Chip Tree that may be
         relevant to the customer's current message.
         Use this information when it is relevant.

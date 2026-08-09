@@ -5,23 +5,17 @@ from sentence_transformers import SentenceTransformer
 
 class KnowledgeBase:
 
-    def __init__(self):
+    def __init__(self, knowledge_file="employee_id.md"):
         print("Loading knowledge base...")
-
         self.model = SentenceTransformer("all-MiniLM-L6-v2")
-
-        self.client = chromadb.PersistentClient(
-            path="knowledge/chroma"
-        )
-
+        self.client = chromadb.PersistentClient(path="knowledge/chroma")
         self.collection = self.client.get_or_create_collection(
-            name="smart_chip"
-        )
-
+        name=f"smart_chip_{knowledge_file.replace('.md', '')}")
+        self.knowledge_file = knowledge_file
         self._load_knowledge()
 
     def _load_knowledge(self):
-        knowledge_path = Path("knowledge/smart_chip.md")
+        knowledge_path = Path("knowledge") / self.knowledge_file
 
         text = knowledge_path.read_text(
             encoding="utf-8"
