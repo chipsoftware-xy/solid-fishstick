@@ -29,8 +29,8 @@ class LLM:
             model=self.model,
             messages=messages,
             options={
-                "temperature": 0.4,
-                "num_predict": 60,
+                "temperature": 0.3,
+                "num_predict": 100,
             }
         )
 

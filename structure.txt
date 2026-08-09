@@ -1,0 +1,31 @@
+__init__
+    ↓
+send()
+    ↓
+empty
+    ↓
+opening
+    ↓
+"what is this about"
+    ↓
+rejection
+    ↓
+busy
+    ↓
+callback confirmation
+    ↓
+callback time
+    ↓
+add user message
+    ↓
+knowledge search
+    ↓
+build llm_messages
+    ↓
+LLM
+    ↓
+detect specialist invitation
+    ↓
+store response
+    ↓
+return
