@@ -2,6 +2,7 @@ from app.llm.ollama_client import LLM
 from app.llm.prompts import SYSTEM_PROMPT, OPENING_MESSAGE
 from app.llm.knowledge_prompts import EMPLOYEE_ID_PROMPT
 from app.knowledge_base import KnowledgeBase
+from app.conversation.controller import ConversationController
 
 REJECTION_PHRASES = {
     "no",
@@ -72,7 +73,7 @@ class ChatSession:
         self.call_started = False
         self.waiting_for_callback_time = False
         self.waiting_for_specialist_details = False
-        from app.llm.knowledge_prompts import EMPLOYEE_ID_PROMPT
+        self.controller = ConversationController()
 
         self.messages = [
             {
@@ -139,6 +140,7 @@ class ChatSession:
             }:
                 self.waiting_for_callback_confirmation = False
                 self.waiting_for_callback_time = True
+                self.controller.start_scheduling()
 
                 return "Okay, what time would be suitable for you?"
 
@@ -161,6 +163,7 @@ class ChatSession:
         #callback time
         if self.waiting_for_callback_time:
             self.waiting_for_callback_time = False
+            self.controller.set_callback_time(user_message)
             return (f"Perfect, our specialist will contact you at {user_message}. "
                     "Thank you for your time, have a great day!")
         
@@ -225,6 +228,7 @@ class ChatSession:
         #Detect when Spark is offering a specialist call
         if any(phrase in reply.lower() for phrase in SPECIALIST_PHRASES):
             self.waiting_for_callback_confirmation = True
+            self.controller.specialist_requested()
 
         # Store assistant response
         self.messages.append(
