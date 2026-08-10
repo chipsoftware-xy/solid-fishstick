@@ -49,6 +49,16 @@ SPECIALIST_YES_PHRASES = {
     "absolutely",
     "of course",
 }
+SCHEDULING_PHRASES = {
+    "call me tomorrow",
+    "call tomorrow",
+    "contact me tomorrow",
+    "tomorrow is fine",
+    "tomorrow works",
+    "call me later",
+    "contact me later",
+    "call me another time",
+}
 
 
 class ChatSession:
@@ -83,19 +93,21 @@ class ChatSession:
         if not self.call_started:
             self.call_started = True
             return OPENING_MESSAGE
-        if clean in {
-            "what is this about?",
-            "what's this about?",
-            "what is this regarding?",
-            "what's this regarding?",
-            "why are you calling?",
-            "what do you offer?",
-            "what do you guys do?",
-            "what is smart chip?"}:
+        if any(phrase in clean for phrase in {
+            "what is this about",
+            "what's this about",
+            "what is this regarding",
+            "what's this regarding",
+            "why are you calling",
+            "what do you offer",
+            "what do you guys do",
+            "what is smart chip"}):
             return (
                 "We provide solutions for employee attendance, access control, "
                 "RFID tracking, ID cards and customized software and hardware integration. "
-                "I wanted to see if you have any requirements in these areas."
+                "For a limited time, we are also offering complimentary services for "
+                "ID card printer servicing, card designing and related software services. "
+                "I wanted to see if any of these areas are relevant to your business."
                 )
         # Rejection
         if clean in REJECTION_PHRASES:
@@ -105,7 +117,7 @@ class ChatSession:
                             )
 
         # Busy
-        if clean in BUSY_PHRASES:
+        if clean in BUSY_PHRASES or "busy" in clean:
             self.waiting_for_callback_confirmation = True
 
             return "No problem. Would another time be better?"
@@ -141,11 +153,15 @@ class ChatSession:
                 return (
                     "No problem, thank you for your time!"
                 )
+        # Customer directly requests a callback
+        if clean in SCHEDULING_PHRASES:
+            self.waiting_for_callback_time = True
+            return "Certainly. What time would be convenient for you?"
+        
         #callback time
         if self.waiting_for_callback_time:
             self.waiting_for_callback_time = False
-            self.waiting_for_specialist_details = False
-            return (f"Perfect, our specialist will contact you at{user_message}."
+            return (f"Perfect, our specialist will contact you at {user_message}. "
                     "Thank you for your time, have a great day!")
         
         #Add customer message to conversation memory
@@ -201,7 +217,7 @@ class ChatSession:
      },
     *self.messages[1:]
     ]
-
+        
         # Generate response
         reply = self.llm.generate(
             llm_messages
