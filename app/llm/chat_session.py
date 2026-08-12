@@ -5,6 +5,13 @@ from app.knowledge_base import KnowledgeBase
 from app.conversation.controller import ConversationController
 import time
 import re
+import json
+import uuid
+import datetime
+from pathlib import Path
+
+TRANSCRIPT_DIR = Path("transcripts")
+TRANSCRIPT_DIR.mkdir(exist_ok=True)
 
 # Flip to False in production — the json/char-count logging below has a
 # small but real per-turn cost (serializing the whole message list).
@@ -40,6 +47,24 @@ SPECIALIST_PHRASES = {
     "schedule a call",
     "arrange a call",
 }
+
+
+def _offers_specialist(reply: str) -> bool:
+    """
+    Detect whether Spark's reply is offering to connect the customer with
+    a specialist. Exact-phrase matching against SPECIALIST_PHRASES is
+    fragile — a generative model paraphrases constantly ("connect you
+    with one", "have someone reach out", "loop in one of our specialists")
+    and silently misses the fixed list, which stalls the whole scheduling
+    flow (the app never learns an offer was made, so it can't recognize
+    the customer's "yes" as accepting it). Falling back to a keyword
+    heuristic catches the paraphrases the fixed list misses.
+    """
+    r = reply.lower()
+    if any(phrase in r for phrase in SPECIALIST_PHRASES):
+        return True
+    return "specialist" in r and "?" in reply
+
 
 SPECIALIST_YES_PHRASES = {
     "yes",
@@ -98,6 +123,45 @@ def _normalize(text: str) -> str:
     return _PUNCT_RE.sub("", text.strip().lower())
 
 
+# Filler words/affirmations people drop in front of a spoken answer
+# ("uhh yeah 6pm", "um so 6pm", "uh Rahul"). Stripped from name,
+# organization, and callback-time answers — narrow enough contexts that
+# being aggressive here is safe.
+_FILLER_WORDS = {
+    "uh", "um", "umm", "uhh", "uhm", "erm", "ah", "hmm", "hm",
+    "yeah", "yep", "yup", "yes", "sure", "okay", "ok", "well",
+    "so", "alright", "right",
+}
+
+
+def _clean_spoken_text(text: str) -> str:
+    words = text.strip().split()
+    cleaned = [w for w in words if w.strip(".,!?").lower() not in _FILLER_WORDS]
+    cleaned_text = " ".join(cleaned).strip()
+    return cleaned_text if cleaned_text else text.strip()
+
+
+# Safety net for the callback-time question specifically: people
+# sometimes volunteer their name unprompted ("around 5pm, i am rahul")
+# even when it was already asked for separately. If a self-identification
+# phrase is found, pull the name out and strip it from the text so it
+# doesn't end up inside the spoken-back time.
+_SELF_ID_RE = re.compile(
+    r"\b(?:i am|i'm|this is|my name is|its|it's)\s+([a-zA-Z]+)\b\.?,?",
+    re.IGNORECASE,
+)
+
+
+def _extract_and_strip_name(text: str):
+    match = _SELF_ID_RE.search(text)
+    if not match:
+        return text, None
+    name = match.group(1).strip()
+    cleaned = (text[:match.start()] + text[match.end():]).strip(" ,.-")
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return (cleaned or text), name
+
+
 class ChatSession:
 
     def __init__(self):
@@ -107,9 +171,13 @@ class ChatSession:
         self.llm = LLM()
         self.knowledge = KnowledgeBase()
         self.call_started = False
+        self.waiting_for_name = False
+        self.waiting_for_organization = False
         self.waiting_for_callback_time = False
-        self.waiting_for_specialist_details = False
         self.controller = ConversationController()
+
+        self.customer_name = None
+        self.customer_organization = None
 
         # Counts substantive (knowledge-search) exchanges so we can nudge
         # the model harder to wrap up once enough info has been gathered.
@@ -118,6 +186,15 @@ class ChatSession:
         # placed next to the latest message steers it far more reliably
         # than the same instruction sitting only in the static prefix.
         self.exchange_count = 0
+
+        # Full, untrimmed record of the call for later data extraction —
+        # separate from self.messages, which is deliberately trimmed for
+        # latency and doesn't include the fast-path replies (rejection,
+        # busy, scheduling, etc). Written to disk incrementally so a
+        # crash mid-call doesn't lose the transcript.
+        self.call_id = uuid.uuid4().hex
+        self.transcript = []
+        self._transcript_path = TRANSCRIPT_DIR / f"{self.call_id}.jsonl"
 
         # SYSTEM_PROMPT + EMPLOYEE_ID_PROMPT are merged ONCE here, into a
         # single static system message that never changes for the life of
@@ -138,6 +215,42 @@ class ChatSession:
             }
         ]
 
+    def _log(self, role, content):
+        entry = {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        }
+        self.transcript.append(entry)
+        with open(self._transcript_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def _reply(self, text):
+        """Log an assistant reply to the transcript, then return it."""
+        self._log("assistant", text)
+        return text
+
+    def save_summary(self, extra=None):
+        """
+        Write a single consolidated JSON for this call (transcript plus
+        any scheduling/metadata you pass in via `extra`, e.g. callback
+        time or lead info from self.controller). Call this when the call
+        ends — on rejection, after a callback time is confirmed, or when
+        your driver loop detects the user hung up / typed exit.
+        """
+        summary = {
+            "call_id": self.call_id,
+            "started": self.transcript[0]["timestamp"] if self.transcript else None,
+            "customer_name": self.customer_name,
+            "customer_organization": self.customer_organization,
+            "transcript": self.transcript,
+        }
+        if extra:
+            summary.update(extra)
+        path = TRANSCRIPT_DIR / f"{self.call_id}_summary.json"
+        path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        return path
+
     def send(self, user_message):
 
         user_message = user_message.strip()
@@ -148,10 +261,12 @@ class ChatSession:
         if not user_message:
             return "Sorry, I didn't catch that."
 
+        self._log("user", user_message)
+
         # Opening Message
         if not self.call_started:
             self.call_started = True
-            return OPENING_MESSAGE
+            return self._reply(OPENING_MESSAGE)
 
         if any(phrase in clean for phrase in {
             "what is this about",
@@ -162,7 +277,7 @@ class ChatSession:
             "what do you offer",
             "what do you guys do",
             "what is smart chip"}):
-            return (
+            return self._reply(
                 "We provide solutions for employee attendance, access control, "
                 "RFID tracking, ID cards and customized software and hardware integration. "
                 "For a limited time, we are also offering complimentary services for "
@@ -172,12 +287,14 @@ class ChatSession:
 
         # Rejection
         if clean in REJECTION_PHRASES:
-            return "No problem at all. Thanks for your time. Have a great day."
+            self.controller.reject()
+            return self._reply("No problem at all. Thanks for your time. Have a great day.")
 
         # Busy
         if clean in BUSY_PHRASES or "busy" in clean:
             self.waiting_for_callback_confirmation = True
-            return "No problem. Would another time be better?"
+            self.controller.busy()
+            return self._reply("No problem. Would another time be better?")
 
         # Callback response — now reuses SPECIALIST_YES_PHRASES /
         # REJECTION_PHRASES instead of a separate hand-typed set that was
@@ -187,26 +304,64 @@ class ChatSession:
 
             if clean in SPECIALIST_YES_PHRASES:
                 self.waiting_for_callback_confirmation = False
-                self.waiting_for_callback_time = True
+                self.waiting_for_name = True
                 self.controller.start_scheduling()
-                return "Okay, what time would be suitable for you?"
+                return self._reply("Great. May I get your name?")
 
             if clean in REJECTION_PHRASES:
                 self.waiting_for_callback_confirmation = False
-                return "No problem, thank you for your time!"
+                self.controller.reject()
+                return self._reply("No problem, thank you for your time!")
 
-        # Customer directly requests a callback
-        if clean in SCHEDULING_PHRASES:
+        # Name and organization are asked as two SEPARATE questions,
+        # deterministically, right after the customer agrees to a
+        # specialist. Trying to parse both out of one combined answer
+        # ("iifl india" — is that a name or a company?) is inherently
+        # ambiguous; asking one at a time removes the ambiguity entirely.
+        if self.waiting_for_name:
+            self.waiting_for_name = False
+            self.customer_name = _clean_spoken_text(user_message)
+            self.waiting_for_organization = True
+            return self._reply("Thanks. And which organization are you calling from?")
+
+        if self.waiting_for_organization:
+            self.waiting_for_organization = False
+            self.customer_organization = _clean_spoken_text(user_message)
+            self.controller.set_contact_details(self.customer_name, self.customer_organization)
             self.waiting_for_callback_time = True
-            return "Certainly. What time would be convenient for you?"
+            return self._reply("Got it. What time would you prefer for the callback?")
 
-        # Callback time
+        # Customer directly requests a callback (skips the confirmation
+        # question) — still routes through name/organization first so
+        # every path to scheduling collects the same details.
+        if clean in SCHEDULING_PHRASES:
+            self.waiting_for_name = True
+            self.controller.start_scheduling()
+            return self._reply("Certainly. May I get your name?")
+
+        # Callback time. Two cleanup passes: first pull out a name if the
+        # customer volunteers one unprompted here anyway ("5pm, i am
+        # rahul"), then strip filler words from what's left so "uhh yeah
+        # 6pm" doesn't get spoken back verbatim. Raw text is still
+        # preserved as-typed in the transcript regardless.
         if self.waiting_for_callback_time:
             self.waiting_for_callback_time = False
-            self.controller.set_callback_time(user_message)
-            return (
-                f"Perfect, our specialist will contact you at {user_message}. "
-                "Thank you for your time, have a great day!"
+
+            remaining_text, extracted_name = _extract_and_strip_name(user_message)
+            if extracted_name and not self.customer_name:
+                self.customer_name = extracted_name.title()
+                self.controller.set_contact_details(
+                    self.customer_name, self.customer_organization
+                )
+
+            callback_time = _clean_spoken_text(remaining_text)
+            self.controller.set_callback_time(callback_time)
+            self.controller.close()
+
+            name_part = f"{self.customer_name}, " if self.customer_name else ""
+            return self._reply(
+                f"Perfect, {name_part}our specialist will contact you at "
+                f"{callback_time}. Thank you for your time, have a great day!"
             )
 
         # Add customer message to conversation memory
@@ -274,7 +429,7 @@ class ChatSession:
             print(f"[TIMING] LLM generation: {time.perf_counter() - start:.2f}s")
 
         # Detect when Spark is offering a specialist call
-        if any(phrase in reply.lower() for phrase in SPECIALIST_PHRASES):
+        if _offers_specialist(reply):
             self.waiting_for_callback_confirmation = True
             self.controller.specialist_requested()
 
@@ -288,4 +443,4 @@ class ChatSession:
         if DEBUG_TIMING:
             print(f"[TIMING] Total response: {time.perf_counter() - total_start:.2f}s")
 
-        return reply
+        return self._reply(reply) 

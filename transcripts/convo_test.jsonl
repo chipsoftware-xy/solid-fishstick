@@ -1,0 +1,18 @@
+{"role": "user", "content": "hello?", "timestamp": "2026-08-12T22:01:38.037241Z"}
+{"role": "assistant", "content": "Hi, this is Spark from Smart Chip Tree. We provide employee ID card and RFID solutions, and we're currently offering free on-site service for ID card printers, card designing and software. Could I have just a brief moment of your time?", "timestamp": "2026-08-12T22:01:38.037241Z"}
+{"role": "user", "content": "yeah sure", "timestamp": "2026-08-12T22:01:42.372033Z"}
+{"role": "assistant", "content": "Okay! Let\u2019s talk about streamlining your employee ID process. Can you tell me a little bit about the scale of what you\u2019re looking at \u2013 roughly how many IDs do you anticipate needing?", "timestamp": "2026-08-12T22:02:07.717431Z"}
+{"role": "user", "content": "we already have a vendor", "timestamp": "2026-08-12T22:02:31.947073Z"}
+{"role": "assistant", "content": "I understand you\u2019re working with an existing vendor currently. That\u2019s great! Would you be open to exploring whether Smart Chip Tree could offer some additional value, particularly around wholesale rates on printer ribbons for brands like Zebra, Evolis, HID Fargo, DataCard or IDP?", "timestamp": "2026-08-12T22:02:41.066910Z"}
+{"role": "user", "content": "oh? that's good, where are you from?", "timestamp": "2026-08-12T22:03:09.368358Z"}
+{"role": "assistant", "content": "I\u2019m calling from Smart Chip Tree \u2013 offices in Delhi, Noida, Bangalore and Pune, HQ in Delhi. Let\u2019s see how we can help with those ID cards. Would you like to speak with a specialist about your needs?", "timestamp": "2026-08-12T22:03:17.954192Z"}
+{"role": "user", "content": "can you deliver to gujrat", "timestamp": "2026-08-12T22:03:45.025384Z"}
+{"role": "assistant", "content": "Yes, absolutely. We offer pan-India service including delivery to Gujarat. Would you like me to connect you with a specialist who can discuss the specifics of your project and delivery options?", "timestamp": "2026-08-12T22:03:53.440876Z"}
+{"role": "user", "content": "yes", "timestamp": "2026-08-12T22:04:00.155443Z"}
+{"role": "assistant", "content": "Great. May I get your name?", "timestamp": "2026-08-12T22:04:00.155443Z"}
+{"role": "user", "content": "arjun", "timestamp": "2026-08-12T22:04:03.687073Z"}
+{"role": "assistant", "content": "Thanks. And which organization are you calling from?", "timestamp": "2026-08-12T22:04:03.687073Z"}
+{"role": "user", "content": "sbc hotel", "timestamp": "2026-08-12T22:04:15.668114Z"}
+{"role": "assistant", "content": "Got it. What time would you prefer for the callback?", "timestamp": "2026-08-12T22:04:15.669255Z"}
+{"role": "user", "content": "around 5pm on friday", "timestamp": "2026-08-12T22:04:25.191286Z"}
+{"role": "assistant", "content": "Perfect, arjun, our specialist will contact you at around 5pm on friday. Thank you for your time, have a great day!", "timestamp": "2026-08-12T22:04:25.192266Z"}

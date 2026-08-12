@@ -19,6 +19,10 @@ class ConversationController:
         self.memory.callback_requested = True
         self.stage = ConversationStage.SCHEDULING
 
+    def set_contact_details(self, name, organization):
+        self.memory.name = name
+        self.memory.company = organization
+
     def set_callback_time(self, time):
         self.memory.callback_time = time
         self.stage = ConversationStage.CLOSING

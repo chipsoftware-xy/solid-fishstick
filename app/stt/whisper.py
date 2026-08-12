@@ -3,7 +3,7 @@ from faster_whisper import WhisperModel
 
 
 class STT:
-    def __init__(self, model_size="small"):
+    def __init__(self, model_size="tiny"):
         print(f"Loading Whisper model ({model_size})...")
         start = time.perf_counter()
 
@@ -19,9 +19,16 @@ class STT:
     def transcribe(self, audio_path):
         start = time.perf_counter()
 
-        segments, info = self.model.transcribe(audio_path)
+        segments, info = self.model.transcribe(
+            audio_path,
+            language="en",
+            beam_size=1
+        )
 
-        text = " ".join(segment.text.strip() for segment in segments)
+        text = " ".join(
+            segment.text.strip()
+            for segment in segments
+        )
 
         end = time.perf_counter()
 

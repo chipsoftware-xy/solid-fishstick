@@ -43,3 +43,5 @@ saleperson/
 │
 ├── requirements.txt
 └── README.md
+
+Gemma3:4b

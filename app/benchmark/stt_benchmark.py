@@ -1,10 +1,13 @@
-from app.stt.whisper import STT
+from app.conversation.voice_session import VoiceSession
 
-stt = STT("small")
+voice = VoiceSession()
 
-result = stt.transcribe("audio/input/test.wav")
+result = voice.process_audio(
+    "audio/input/test.wav"
+)
 
-print("\n===== RESULTS =====")
-print(f"Language : {result['language']}")
-print(f"Time     : {result['duration']:.2f}s")
-print(f"Text     : {result['text']}")
+if result:
+    print("\n===== RESULT =====")
+    print("User :", result["user_text"])
+    print("Spark:", result["reply"])
+    print("Audio:", result["audio_path"])
