@@ -162,6 +162,32 @@ def _extract_and_strip_name(text: str):
     return (cleaned or text), name
 
 
+# Splits a stream of text deltas into complete sentences as soon as
+# terminal punctuation appears, so each sentence can be handed to TTS the
+# moment it's ready instead of waiting for the whole reply. Any leftover
+# partial text is flushed as a final "sentence" once the stream ends, so
+# nothing generated is ever dropped even if the model doesn't end its
+# reply on clean punctuation.
+_SENTENCE_END_RE = re.compile(r"[.!?](\s|$)")
+
+
+def _stream_to_sentences(delta_iter):
+    buffer = ""
+    for delta in delta_iter:
+        buffer += delta
+        while True:
+            match = _SENTENCE_END_RE.search(buffer)
+            if not match:
+                break
+            split_at = match.end()
+            sentence = buffer[:split_at].strip()
+            if sentence:
+                yield sentence
+            buffer = buffer[split_at:]
+    if buffer.strip():
+        yield buffer.strip()
+
+
 class ChatSession:
 
     def __init__(self):
@@ -181,29 +207,20 @@ class ChatSession:
 
         # Counts substantive (knowledge-search) exchanges so we can nudge
         # the model harder to wrap up once enough info has been gathered.
-        # gemma3:4b weighs recent context far more than instructions
-        # buried in a long, distant system prompt — a small reminder
-        # placed next to the latest message steers it far more reliably
-        # than the same instruction sitting only in the static prefix.
         self.exchange_count = 0
 
         # Full, untrimmed record of the call for later data extraction —
         # separate from self.messages, which is deliberately trimmed for
-        # latency and doesn't include the fast-path replies (rejection,
-        # busy, scheduling, etc). Written to disk incrementally so a
-        # crash mid-call doesn't lose the transcript.
+        # latency. Written to disk incrementally so a crash mid-call
+        # doesn't lose the transcript.
         self.call_id = uuid.uuid4().hex
         self.transcript = []
         self._transcript_path = TRANSCRIPT_DIR / f"{self.call_id}.jsonl"
 
-        # SYSTEM_PROMPT + EMPLOYEE_ID_PROMPT are merged ONCE here, into a
-        # single static system message that never changes for the life of
-        # the session. Previously the full EMPLOYEE_ID_PROMPT text (plus
-        # extra restated instructions) was rebuilt and reinserted on every
-        # turn, which doubled prompt size and prevented Ollama from
-        # reusing its KV cache across turns. Keeping this block byte-
-        # identical every call lets the (large, fixed) instruction prefix
-        # get cached instead of reprocessed each time.
+        # SYSTEM_PROMPT + EMPLOYEE_ID_PROMPT merged ONCE into a static
+        # system message that never changes for the life of the session,
+        # so Ollama can reuse its KV cache across turns instead of
+        # reprocessing the full instructions every time.
         combined_system_prompt = (
             f"{SYSTEM_PROMPT.strip()}\n\n{EMPLOYEE_ID_PROMPT.strip()}"
         )
@@ -232,11 +249,9 @@ class ChatSession:
 
     def save_summary(self, extra=None):
         """
-        Write a single consolidated JSON for this call (transcript plus
-        any scheduling/metadata you pass in via `extra`, e.g. callback
-        time or lead info from self.controller). Call this when the call
-        ends — on rejection, after a callback time is confirmed, or when
-        your driver loop detects the user hung up / typed exit.
+        Write a single consolidated JSON for this call. Call this when
+        the call ends — on rejection, after a callback time is
+        confirmed, or when your driver loop detects hangup/exit.
         """
         summary = {
             "call_id": self.call_id,
@@ -251,17 +266,13 @@ class ChatSession:
         path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         return path
 
-    def send(self, user_message):
-
-        user_message = user_message.strip()
-        clean = _normalize(user_message)
-        total_start = time.perf_counter()
-
-        # Empty input
-        if not user_message:
-            return "Sorry, I didn't catch that."
-
-        self._log("user", user_message)
+    # ------------------------------------------------------------------
+    # Deterministic fast path — every branch here is a canned reply, no
+    # LLM call involved. Shared by both send() and send_streaming() so
+    # this logic only exists once. Returns the reply string if this turn
+    # was fully handled here, or None if it needs to go to the LLM.
+    # ------------------------------------------------------------------
+    def _try_fast_path(self, user_message, clean):
 
         # Opening Message
         if not self.call_started:
@@ -296,10 +307,7 @@ class ChatSession:
             self.controller.busy()
             return self._reply("No problem. Would another time be better?")
 
-        # Callback response — now reuses SPECIALIST_YES_PHRASES /
-        # REJECTION_PHRASES instead of a separate hand-typed set that was
-        # missing "absolutely" / "of course" (those used to fall through
-        # to a full, slower LLM call instead of the instant fast path).
+        # Callback confirmation response
         if self.waiting_for_callback_confirmation:
 
             if clean in SPECIALIST_YES_PHRASES:
@@ -313,11 +321,7 @@ class ChatSession:
                 self.controller.reject()
                 return self._reply("No problem, thank you for your time!")
 
-        # Name and organization are asked as two SEPARATE questions,
-        # deterministically, right after the customer agrees to a
-        # specialist. Trying to parse both out of one combined answer
-        # ("iifl india" — is that a name or a company?) is inherently
-        # ambiguous; asking one at a time removes the ambiguity entirely.
+        # Name and organization — two separate deterministic questions.
         if self.waiting_for_name:
             self.waiting_for_name = False
             self.customer_name = _clean_spoken_text(user_message)
@@ -331,19 +335,13 @@ class ChatSession:
             self.waiting_for_callback_time = True
             return self._reply("Got it. What time would you prefer for the callback?")
 
-        # Customer directly requests a callback (skips the confirmation
-        # question) — still routes through name/organization first so
-        # every path to scheduling collects the same details.
+        # Customer directly requests a callback, skipping confirmation.
         if clean in SCHEDULING_PHRASES:
             self.waiting_for_name = True
             self.controller.start_scheduling()
             return self._reply("Certainly. May I get your name?")
 
-        # Callback time. Two cleanup passes: first pull out a name if the
-        # customer volunteers one unprompted here anyway ("5pm, i am
-        # rahul"), then strip filler words from what's left so "uhh yeah
-        # 6pm" doesn't get spoken back verbatim. Raw text is still
-        # preserved as-typed in the transcript regardless.
+        # Callback time.
         if self.waiting_for_callback_time:
             self.waiting_for_callback_time = False
 
@@ -364,13 +362,17 @@ class ChatSession:
                 f"{callback_time}. Thank you for your time, have a great day!"
             )
 
-        # Add customer message to conversation memory
+        return None
+
+    # ------------------------------------------------------------------
+    # Shared LLM-turn setup: appends to history, retrieves knowledge,
+    # builds the reminder block. Used by both the blocking and streaming
+    # LLM paths so this logic only exists once.
+    # ------------------------------------------------------------------
+    def _build_llm_messages(self, user_message, clean):
         self.messages.append({"role": "user", "content": user_message})
         self.exchange_count += 1
 
-        # Skip retrieval for low-signal replies — nothing meaningful to
-        # search for, and an irrelevant top-1 match risks getting echoed
-        # back verbatim by the model (see GENERIC_CONTINUATIONS above).
         if clean in GENERIC_CONTINUATIONS:
             knowledge_context = ""
         else:
@@ -380,12 +382,6 @@ class ChatSession:
                 print(f"[TIMING] Knowledge search: {time.perf_counter() - start:.2f}s")
             knowledge_context = "\n\n".join(knowledge_results)
 
-        # Short, cheap reminder placed right next to the latest user
-        # message. The full rules already live in the static system
-        # prompt, but a weak model needs the critical ones repeated close
-        # to generation time to reliably follow them — especially
-        # "don't repeat the opening," which it otherwise tends to lift
-        # verbatim from earlier context on vague turns.
         if self.exchange_count >= 2:
             stage_note = (
                 "the customer has now described what they need. Do not ask "
@@ -416,31 +412,108 @@ class ChatSession:
         llm_messages = list(self.messages)
         llm_messages.insert(-1, {
             "role": "system",
-            "content": knowledge_block
+            "content": (
+                f"{user_message}\n\n"
+                f"{knowledge_block}"
+            )
         })
 
         if DEBUG_TIMING:
             prompt_chars = sum(len(m["content"]) for m in llm_messages)
             print(f"[TIMING] Prompt size: {prompt_chars} characters")
 
+        return llm_messages
+
+    def _finalize_llm_reply(self, reply):
+        if _offers_specialist(reply):
+            self.waiting_for_callback_confirmation = True
+            self.controller.specialist_requested()
+
+        self.messages.append({"role": "assistant", "content": reply})
+
+        if len(self.messages) > 5:
+            self.messages = [self.messages[0], *self.messages[-4:]]
+
+        return self._reply(reply)
+
+    def send(self, user_message):
+        """Blocking version — waits for the full reply before returning."""
+        user_message = user_message.strip()
+        total_start = time.perf_counter()
+
+        if not user_message:
+            return "Sorry, I didn't catch that."
+
+        self._log("user", user_message)
+        clean = _normalize(user_message)
+
+        fast_reply = self._try_fast_path(user_message, clean)
+        if fast_reply is not None:
+            return fast_reply
+
+        llm_messages = self._build_llm_messages(user_message, clean)
+
         start = time.perf_counter()
         reply = self.llm.generate(llm_messages)
         if DEBUG_TIMING:
             print(f"[TIMING] LLM generation: {time.perf_counter() - start:.2f}s")
 
-        # Detect when Spark is offering a specialist call
-        if _offers_specialist(reply):
-            self.waiting_for_callback_confirmation = True
-            self.controller.specialist_requested()
-
-        # Store assistant response
-        self.messages.append({"role": "assistant", "content": reply})
-
-        # Keep conversation memory small
-        if len(self.messages) > 5:
-            self.messages = [self.messages[0], *self.messages[-4:]]
+        result = self._finalize_llm_reply(reply)
 
         if DEBUG_TIMING:
             print(f"[TIMING] Total response: {time.perf_counter() - total_start:.2f}s")
 
-        return self._reply(reply) 
+        return result
+
+    def send_streaming(self, user_message, on_sentence):
+        """
+        Streaming version for live calls. `on_sentence(text)` is called
+        once per complete sentence as soon as it's ready — wire this to
+        your TTS/playback so the caller starts hearing Spark speak after
+        the first sentence instead of waiting for the whole reply.
+
+        Fast-path (deterministic) replies call on_sentence exactly once
+        with the full canned reply, since there's nothing to stream —
+        those are already instant. Returns the full reply text either
+        way, same as send().
+        """
+        user_message = user_message.strip()
+        total_start = time.perf_counter()
+
+        if not user_message:
+            reply = "Sorry, I didn't catch that."
+            on_sentence(reply)
+            return reply
+
+        self._log("user", user_message)
+        clean = _normalize(user_message)
+
+        fast_reply = self._try_fast_path(user_message, clean)
+        if fast_reply is not None:
+            on_sentence(fast_reply)
+            return fast_reply
+
+        llm_messages = self._build_llm_messages(user_message, clean)
+
+        start = time.perf_counter()
+        full_sentences = []
+        first_sentence_at = None
+
+        for sentence in _stream_to_sentences(self.llm.generate_stream(llm_messages)):
+            if first_sentence_at is None:
+                first_sentence_at = time.perf_counter()
+                if DEBUG_TIMING:
+                    print(f"[TIMING] Time to first sentence: {first_sentence_at - start:.2f}s")
+            full_sentences.append(sentence)
+            on_sentence(sentence)
+
+        if DEBUG_TIMING:
+            print(f"[TIMING] LLM generation (full): {time.perf_counter() - start:.2f}s")
+
+        reply = " ".join(full_sentences)
+        result = self._finalize_llm_reply(reply)
+
+        if DEBUG_TIMING:
+            print(f"[TIMING] Total response: {time.perf_counter() - total_start:.2f}s")
+
+        return result 

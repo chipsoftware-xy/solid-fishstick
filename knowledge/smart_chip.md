@@ -13,7 +13,7 @@ card personalization/encoding; hardware and software integration and
 deployment; cloud-connected smart card solutions; full-stack software;
 customized technology solutions.
 
-Manufactures: PVC, MIFARE, Aadhar, EPIC, and sticky cards.
+Manufactures: PVC, MIFARE, Aadhar, EPIC, financial cards, and sticky cards.
 
 ## Industries served
 Corporate/enterprise, education (schools, colleges, universities,

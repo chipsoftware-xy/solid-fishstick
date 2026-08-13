@@ -5,6 +5,12 @@ import wave
 from piper.voice import PiperVoice
 
 
+def _prepare_text(text: str) -> str:
+    # Improve pronunciation for TTS without changing the actual transcript.
+    text = text.replace("RFID", "R F I D")
+    return text
+
+
 class TTS:
     def __init__(self):
         self.model_path = Path("models/piper/voices/en_US-amy-medium.onnx")
@@ -19,6 +25,10 @@ class TTS:
 
     def speak(self, text: str, output_path: str):
         start = time.perf_counter()
+
+        # Only modify the text going into Piper.
+        # The original Spark response remains unchanged in the transcript.
+        text = _prepare_text(text)
 
         chunks = list(self.voice.synthesize(text))
 

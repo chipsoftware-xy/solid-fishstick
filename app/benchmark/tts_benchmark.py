@@ -1,13 +1,18 @@
-from app.tts.piper import TTS
+from app.conversation.voice_session import VoiceSession
 
+voice = VoiceSession()
 
-tts = TTS()
+# Start the call so Spark's opening is already established.
+voice.chat.send("hello")
 
-elapsed = tts.speak(
-    "Hello, this is your Smart Chip AI assistant.",
-    "audio/output/response.wav",
+print("\n========== TURN 1 ==========")
+
+result1 = voice.process_audio_streaming(
+    "audio/input/test2.wav"
 )
 
-print("\n===== RESULTS =====")
-print(f"TTS Time : {elapsed:.2f}s")
-print("Saved to : audio/output/response.wav")
+print("\n========== TURN 2 ==========")
+
+result2 = voice.process_audio_streaming(
+    "audio/input/test3.wav"
+)
