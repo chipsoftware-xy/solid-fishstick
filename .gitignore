@@ -64,3 +64,10 @@ desktop.ini
 # VS Code
 # =========================
 .vscode/
+
+# Call transcripts
+transcripts/
+
+
+# Generated audio
+audio/output/
