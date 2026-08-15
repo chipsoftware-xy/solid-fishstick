@@ -11,8 +11,10 @@ print("\nSpark is listening. Speak when ready.")
 while True:
 
     audio_path = Path("audio/input/live_input.wav")
-
-    record_until_enter(str(audio_path))
+    duration, had_speech = record_until_enter(str(audio_path))
+    if not had_speech:
+        print("Spark: (heard nothing, waiting for you to speak.)")
+        continue
 
     result = voice.process_audio_streaming(str(audio_path))
 

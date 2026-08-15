@@ -5,6 +5,7 @@ from app.knowledge_base import KnowledgeBase
 from app.conversation.controller import ConversationController
 import time
 import re
+import difflib
 import json
 import uuid
 import datetime
@@ -162,6 +163,102 @@ def _extract_and_strip_name(text: str):
     return (cleaned or text), name
 
 
+# Strips a leading self-identification phrase before storing a name
+# answer, so "my name is Rahul" / "I'm Rahul" / "it's Rahul" all end up
+# stored as just "Rahul" instead of the whole sentence.
+_NAME_PREFIX_RE = re.compile(
+    r"^\s*(?:my name is|the name is|i am|i'm|this is|it'?s|call me)\s+",
+    re.IGNORECASE,
+)
+
+
+def _extract_name_answer(text: str) -> str:
+    stripped = _NAME_PREFIX_RE.sub("", text.strip()).rstrip(".,!?").strip()
+    cleaned = _clean_spoken_text(stripped) if stripped else _clean_spoken_text(text)
+    return cleaned or text.strip()
+
+
+# Same idea for organization answers: "it's Acme Corp" / "I'm calling
+# from Acme" / "we're with Acme" -> just "Acme Corp".
+_ORG_PREFIX_RE = re.compile(
+    r"^\s*(?:i'?m(?:\s+calling)?\s+from|we'?re(?:\s+calling)?\s+from|"
+    r"calling from|i work for|i'?m with|we'?re with|it'?s|this is|from)\s+",
+    re.IGNORECASE,
+)
+
+
+def _extract_org_answer(text: str) -> str:
+    stripped = _ORG_PREFIX_RE.sub("", text.strip()).rstrip(".,!?").strip()
+    cleaned = _clean_spoken_text(stripped) if stripped else _clean_spoken_text(text)
+    return cleaned or text.strip()
+
+
+# Loose check that a callback-time answer actually looks like a time,
+# rather than blindly accepting whatever text came out of STT (garbled
+# audio was previously being read back verbatim as the scheduled time,
+# e.g. "contact you at Try this experience.."). Deliberately permissive
+# — this only needs to catch clearly-not-a-time garbage, not validate
+# real time formats precisely.
+_TIME_SIGNAL_RE = re.compile(
+    r"\d|am\b|pm\b|a\.m|p\.m|morning|afternoon|evening|tonight|noon|"
+    r"midnight|today|tomorrow|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday|o'?clock",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_time(text: str) -> bool:
+    return bool(_TIME_SIGNAL_RE.search(text))
+
+
+# Lets the customer correct a mis-heard name/organization at ANY point
+# in the call, not just during the dedicated question — e.g. "actually
+# it's Alex, not Ali". Only checked once self.customer_name /
+# self.customer_organization is already set (see the gating in
+# _try_fast_path), so this never fires during the initial collection
+# question, which is handled separately by _extract_name_answer.
+_NAME_CORRECTION_RE = re.compile(
+    r"\b(?:my name is|call me|it'?s|i'?m)\s+([a-zA-Z]+)",
+    re.IGNORECASE,
+)
+_ORG_CORRECTION_RE = re.compile(
+    r"\b(?:i'?m calling from|we'?re calling from|calling from|"
+    r"my company is|my organization is|it'?s)\s+([A-Za-z0-9&.\- ]+?)"
+    r"(?:[.,!?]|$)",
+    re.IGNORECASE,
+)
+
+
+def _detect_name_correction(text: str):
+    match = _NAME_CORRECTION_RE.search(text)
+    return match.group(1).strip() if match else None
+
+
+def _detect_org_correction(text: str):
+    match = _ORG_CORRECTION_RE.search(text)
+    return match.group(1).strip() if match else None
+
+
+# STT frequently mangles short affirmations/rejections into nonsense
+# ("Yashur", "Yashore" for "yeah sure") — an exact-match check sends
+# these to a full ~15-20s LLM call for what should be an instant
+# deterministic response, and it can take several tries before one
+# happens to transcribe cleanly enough to match. Fuzzy-matching short
+# inputs against the known target phrases catches most of these without
+# a real fix to STT itself. Deliberately restricted to short inputs
+# (<=3 words) to avoid ever mismatching a genuine, longer sentence.
+def _fuzzy_match_short_phrase(clean_text: str, targets: set, threshold: float = 0.6):
+    words = clean_text.split()
+    if not words or len(words) > 3:
+        return None
+    best, best_ratio = None, 0.0
+    for target in targets:
+        ratio = difflib.SequenceMatcher(None, clean_text, target).ratio()
+        if ratio > best_ratio:
+            best_ratio, best = ratio, target
+    return best if best_ratio >= threshold else None
+
+
 # Splits a stream of text deltas into complete sentences as soon as
 # terminal punctuation appears, so each sentence can be handed to TTS the
 # moment it's ready instead of waiting for the whole reply. Any leftover
@@ -188,6 +285,33 @@ def _stream_to_sentences(delta_iter):
         yield buffer.strip()
 
 
+# Printer brands worth proactively connecting to the wholesale-ribbon
+# offer. This fact already lives in the static system prompt (see
+# EMPLOYEE_ID_PROMPT's FOCUS list), but a distant, static mention isn't
+# enough for gemma3:4b to reliably act on — same pattern as the
+# specialist-push and no-repeat-opening reminders. Detecting the brand
+# mention in code and reinforcing it right next to the latest message
+# makes the connection deterministic instead of hoping the model infers it.
+_PRINTER_BRAND_ALIASES = {
+    "zebra": "Zebra",
+    "evolis": "Evolis",
+    "hid fargo": "HID Fargo",
+    "fargo": "HID Fargo",
+    "datacard": "DataCard",
+    "data card": "DataCard",
+    "idp": "IDP",
+    "retransfer": "retransfer",
+}
+
+
+def _mentioned_printer_brand(user_message: str):
+    text = user_message.lower()
+    for alias, canonical in _PRINTER_BRAND_ALIASES.items():
+        if alias in text:
+            return canonical
+    return None
+
+
 class ChatSession:
 
     def __init__(self):
@@ -204,6 +328,15 @@ class ChatSession:
 
         self.customer_name = None
         self.customer_organization = None
+        self._time_retry_count = 0
+        self._pending_callback_time = None
+
+        # Brand mentioned in the CURRENT turn (set in _build_llm_messages,
+        # consumed/cleared in _maybe_add_ribbon_fallback). Brands already
+        # offered ribbons for are tracked so we don't repeat the same
+        # upsell every time the customer references the same brand again.
+        self._pending_brand = None
+        self.brands_offered_ribbons_for = set()
 
         # Counts substantive (knowledge-search) exchanges so we can nudge
         # the model harder to wrap up once enough info has been gathered.
@@ -279,6 +412,46 @@ class ChatSession:
             self.call_started = True
             return self._reply(OPENING_MESSAGE)
 
+        # Let the customer correct a mis-heard name/org at ANY point,
+        # not just during the dedicated question. Gated on the field
+        # already being set, so this never intercepts the initial
+        # collection question itself (self.customer_name is still None
+        # at that point, handled separately by _extract_name_answer).
+        if self.customer_name and (
+            "my name is" in clean
+            or "call me" in clean
+            or "actually" in clean
+            or "correction" in clean
+            or "not " in clean
+        ):
+            corrected = _detect_name_correction(user_message)
+            if corrected and corrected.lower() != self.customer_name.lower():
+                self.customer_name = corrected.title()
+                self.controller.set_contact_details(
+                    self.customer_name, self.customer_organization
+                )
+                return self._reply(
+                    f"Got it — I've updated your name to {self.customer_name}."
+                )
+
+        if self.customer_organization and (
+            "my organization is" in clean
+            or "my company is" in clean
+            or "calling from" in clean
+            or "actually" in clean
+            or "correction" in clean
+        ):
+            corrected_org = _detect_org_correction(user_message)
+            if corrected_org and corrected_org.lower() != self.customer_organization.lower():
+                self.customer_organization = corrected_org
+                self.controller.set_contact_details(
+                    self.customer_name, self.customer_organization
+                )
+                return self._reply(
+                    f"Got it — I've updated your organization to "
+                    f"{self.customer_organization}."
+                )
+
         if any(phrase in clean for phrase in {
             "what is this about",
             "whats this about",
@@ -310,28 +483,70 @@ class ChatSession:
         # Callback confirmation response
         if self.waiting_for_callback_confirmation:
 
-            if clean in SPECIALIST_YES_PHRASES:
+            # Exact match first; fuzzy match as a fallback for garbled
+            # short STT output ("Yashur", "Yashore" for "yeah sure") —
+            # without this, each garbled attempt costs a full ~15-20s
+            # LLM call for what should be an instant response, and it
+            # can take several tries before one happens to transcribe
+            # cleanly enough to match exactly.
+            if clean in SPECIALIST_YES_PHRASES or _fuzzy_match_short_phrase(
+                clean, SPECIALIST_YES_PHRASES
+            ):
                 self.waiting_for_callback_confirmation = False
                 self.waiting_for_name = True
                 self.controller.start_scheduling()
                 return self._reply("Great. May I get your name?")
 
-            if clean in REJECTION_PHRASES:
+            if clean in REJECTION_PHRASES or _fuzzy_match_short_phrase(
+                clean, REJECTION_PHRASES
+            ):
                 self.waiting_for_callback_confirmation = False
                 self.controller.reject()
                 return self._reply("No problem, thank you for your time!")
 
+            if _looks_like_time(user_message):
+                # Safety net: the model may have asked "what time works
+                # for you" itself in the same breath as the specialist
+                # offer, despite being told not to — a known failure mode
+                # even with the reminder above. Rather than losing this
+                # answer to a generic LLM turn (which previously caused
+                # the call to end without ever collecting name/org/time),
+                # treat it as an implicit yes and capture the time now.
+                # Name + organization are still collected normally; the
+                # separate time question just gets skipped since we
+                # already have it.
+                self.waiting_for_callback_confirmation = False
+                self._pending_callback_time = _clean_spoken_text(user_message)
+                self.waiting_for_name = True
+                self.controller.start_scheduling()
+                return self._reply("Great. May I get your name?")
+
         # Name and organization — two separate deterministic questions.
         if self.waiting_for_name:
             self.waiting_for_name = False
-            self.customer_name = _clean_spoken_text(user_message)
+            self.customer_name = _extract_name_answer(user_message)
             self.waiting_for_organization = True
             return self._reply("Thanks. And which organization are you calling from?")
 
         if self.waiting_for_organization:
             self.waiting_for_organization = False
-            self.customer_organization = _clean_spoken_text(user_message)
+            self.customer_organization = _extract_org_answer(user_message)
             self.controller.set_contact_details(self.customer_name, self.customer_organization)
+
+            if self._pending_callback_time:
+                # Time was already captured during the confirmation step
+                # (see the safety net above) — skip asking again.
+                callback_time = self._pending_callback_time
+                self._pending_callback_time = None
+                self.controller.set_callback_time(callback_time)
+                self.controller.close()
+                name_part = f"{self.customer_name}, " if self.customer_name else ""
+                return self._reply(
+                    f"Perfect, {name_part}our specialist will contact you "
+                    f"at {callback_time}. Thank you for your time, have a "
+                    f"great day!"
+                )
+
             self.waiting_for_callback_time = True
             return self._reply("Got it. What time would you prefer for the callback?")
 
@@ -343,7 +558,6 @@ class ChatSession:
 
         # Callback time.
         if self.waiting_for_callback_time:
-            self.waiting_for_callback_time = False
 
             remaining_text, extracted_name = _extract_and_strip_name(user_message)
             if extracted_name and not self.customer_name:
@@ -353,6 +567,28 @@ class ChatSession:
                 )
 
             callback_time = _clean_spoken_text(remaining_text)
+
+            if not _looks_like_time(callback_time):
+                self._time_retry_count += 1
+                if self._time_retry_count >= 2:
+                    # Cap retries so a customer isn't trapped in a loop
+                    # if STT keeps failing on this turn — give up
+                    # gracefully rather than repeating the question
+                    # indefinitely.
+                    self.waiting_for_callback_time = False
+                    self.controller.set_callback_time(None)
+                    self.controller.close()
+                    return self._reply(
+                        "No problem — our specialist will reach out to "
+                        "find a time that works. Thank you for your "
+                        "time, have a great day!"
+                    )
+                return self._reply(
+                    "Sorry, I didn't catch a valid time — could you say "
+                    "that again? For example, 'tomorrow at 3pm'."
+                )
+
+            self.waiting_for_callback_time = False
             self.controller.set_callback_time(callback_time)
             self.controller.close()
 
@@ -377,7 +613,16 @@ class ChatSession:
             knowledge_context = ""
         else:
             start = time.perf_counter()
-            knowledge_results = self.knowledge.search(user_message, n_results=1)
+            # n_results=2 rather than 1: this knowledge base only chunks
+            # into 2 pieces total (see "Knowledge base ready (2 chunks)"
+            # in your logs), so retrieving just 1 meant Spark only ever
+            # saw HALF the company knowledge on any given turn, and which
+            # half was unpredictable. At this corpus size there's no real
+            # benefit to similarity filtering — just always include both.
+            # If employee_id.md grows significantly later, this should
+            # be revisited (bump back down + rely on the distance
+            # threshold in KnowledgeBase.search).
+            knowledge_results = self.knowledge.search(user_message, n_results=2)
             if DEBUG_TIMING:
                 print(f"[TIMING] Knowledge search: {time.perf_counter() - start:.2f}s")
             knowledge_context = "\n\n".join(knowledge_results)
@@ -386,8 +631,11 @@ class ChatSession:
             stage_note = (
                 "the customer has now described what they need. Do not ask "
                 "further clarifying questions (size, design, quantity, "
-                "color, etc). Acknowledge you can help and ask if they'd "
-                "like to be connected with a specialist."
+                "color, etc). Acknowledge you can help and ask ONLY if "
+                "they'd like to be connected with a specialist — do not "
+                "ask what time works for them, do not suggest a day or "
+                "time yourself. The app asks for a time separately, only "
+                "after they say yes."
             )
         else:
             stage_note = (
@@ -399,8 +647,21 @@ class ChatSession:
             "REMINDER: continue naturally from the conversation so far. "
             "Do not repeat the call opening and do not reintroduce "
             "yourself — that already happened. Do not state you're an AI "
-            f"unless directly asked. And {stage_note}"
+            f"unless directly asked. Keep this reply short — one or two "
+            f"sentences, under 35 words total; do not stack three or "
+            f"more sentences even if you have more you could say. And "
+            f"{stage_note}"
         )
+
+        brand = _mentioned_printer_brand(user_message)
+        self._pending_brand = brand
+        if brand:
+            reminder += (
+                f" The customer just mentioned {brand}. Proactively "
+                f"mention that Smart Chip Tree offers wholesale rates on "
+                f"{brand} printer ribbons, even though they didn't ask "
+                f"about ribbons directly."
+            )
 
         knowledge_block = (
             f"RELEVANT KNOWLEDGE (reference only — use to inform your "
@@ -412,10 +673,7 @@ class ChatSession:
         llm_messages = list(self.messages)
         llm_messages.insert(-1, {
             "role": "system",
-            "content": (
-                f"{user_message}\n\n"
-                f"{knowledge_block}"
-            )
+            "content": knowledge_block
         })
 
         if DEBUG_TIMING:
@@ -423,6 +681,46 @@ class ChatSession:
             print(f"[TIMING] Prompt size: {prompt_chars} characters")
 
         return llm_messages
+
+    def _maybe_add_ribbon_fallback(self, reply, on_sentence=None):
+        """
+        Guarantees the wholesale-ribbon upsell actually happens when a
+        printer brand is mentioned, instead of hoping the model acts on
+        the reminder (it doesn't reliably — see the DataCard turn where
+        it didn't, then the Zebra turn where it did). If the model
+        already brought it up on its own, this is a no-op. Only fires
+        once per brand per call, so referencing the same brand again
+        later doesn't repeat the same upsell every time.
+
+        `on_sentence`, if given (streaming path), is called with the
+        fallback sentence so it actually gets synthesized and played —
+        by this point every sentence the LLM produced has already been
+        spoken, so just appending text to `reply` would leave it in the
+        transcript without the customer ever hearing it.
+        """
+        brand = self._pending_brand
+        self._pending_brand = None
+
+        if not brand or brand in self.brands_offered_ribbons_for:
+            return reply
+
+        self.brands_offered_ribbons_for.add(brand)
+
+        if "wholesale" in reply.lower() or "ribbon" in reply.lower():
+            return reply
+
+        fallback_sentence = (
+            f"By the way, we also offer wholesale rates on {brand} "
+            f"printer ribbons."
+        )
+
+        if on_sentence:
+            on_sentence(fallback_sentence)
+
+        reply = reply.rstrip()
+        if reply and reply[-1] not in ".!?":
+            reply += "."
+        return f"{reply} {fallback_sentence}"
 
     def _finalize_llm_reply(self, reply):
         if _offers_specialist(reply):
@@ -458,6 +756,7 @@ class ChatSession:
         if DEBUG_TIMING:
             print(f"[TIMING] LLM generation: {time.perf_counter() - start:.2f}s")
 
+        reply = self._maybe_add_ribbon_fallback(reply)
         result = self._finalize_llm_reply(reply)
 
         if DEBUG_TIMING:
@@ -511,9 +810,10 @@ class ChatSession:
             print(f"[TIMING] LLM generation (full): {time.perf_counter() - start:.2f}s")
 
         reply = " ".join(full_sentences)
+        reply = self._maybe_add_ribbon_fallback(reply, on_sentence=on_sentence)
         result = self._finalize_llm_reply(reply)
 
         if DEBUG_TIMING:
             print(f"[TIMING] Total response: {time.perf_counter() - total_start:.2f}s")
 
-        return result 
+        return result

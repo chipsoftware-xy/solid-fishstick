@@ -29,7 +29,12 @@ class LLM:
         # first real request when the options didn't match.
         self.options = {
             "temperature": 0.3,
-            "num_predict": 70,
+            # ~35 words is roughly 45-55 tokens for English; capped a
+            # little above that as a hard backstop, not because the
+            # reminder alone reliably keeps replies short (it doesn't —
+            # 3-4 sentence, ~70-token replies showed up in testing
+            # despite the "under 35 words" instruction).
+            "num_predict": 55,
             "num_thread": num_thread,
             # Matches your typical prompt size (~1200-1600 tokens with
             # history + knowledge) plus headroom for the reply, instead
@@ -42,14 +47,20 @@ class LLM:
 
         print(f"Loading {model}...")
 
-        # Warm up the model
+        # Warm up with the REAL static system prompt, not a throwaway
+        # message — warming with something unrelated (e.g. just "Hi")
+        # doesn't prime anything useful for the actual conversations that
+        # follow, and can even displace a cache slot that might otherwise
+        # hold this same prefix from a previous run/call.
+        from app.llm.prompts import SYSTEM_PROMPT
+        from app.llm.knowledge_prompts import EMPLOYEE_ID_PROMPT
+        warmup_system_prompt = f"{SYSTEM_PROMPT.strip()}\n\n{EMPLOYEE_ID_PROMPT.strip()}"
+
         self.client.chat(
             model=self.model,
             messages=[
-                {
-                    "role": "user",
-                    "content": "Hi"
-                }
+                {"role": "system", "content": warmup_system_prompt},
+                {"role": "user", "content": "Hi"},
             ],
             keep_alive=KEEP_ALIVE,
             options=self.options,
@@ -117,7 +128,12 @@ class LLM:
                 final_chunk = chunk
 
         end = time.perf_counter()
-        print(f"[LLM] Total: {end - start:.2f}s")
+        # NOTE: unlike generate()'s "Total", this span includes whatever
+        # time the CALLER spent between pulling chunks (e.g. TTS +
+        # blocking playback in on_sentence) — it's wall clock around the
+        # whole generator, not pure model time. Use Prompt eval /
+        # Generation / Load below for the actual model-side cost.
+        print(f"[LLM] Total (incl. caller processing time): {end - start:.2f}s")
         if final_chunk is not None:
             print(f"[LLM] Prompt tokens: {final_chunk.prompt_eval_count}")
             print(f"[LLM] Prompt eval: {final_chunk.prompt_eval_duration / 1e9:.2f}s")
