@@ -1,0 +1,1 @@
+"""Spark sales-call assistant application package."""

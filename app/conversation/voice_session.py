@@ -5,25 +5,19 @@ from app.llm.chat_session import ChatSession
 from app.stt.whisper import STT
 from app.tts.piper import TTS
 from app.audio.playback import play_wav
+from app.config import settings
 
 # avg_logprob from faster_whisper: closer to 0 = confident, more
 # negative = uncertain. Below this threshold, the transcription is
 # treated as unreliable and Spark asks the customer to repeat themselves
 # instead of handing possibly-garbled text to the LLM.
 #
-# IMPORTANT: this threshold is NOT portable across Whisper model sizes.
-# It was tuned loosely against "tiny"; switching to "base" shifted the
-# whole score distribution more negative — three CORRECT "Hello."
-# transcriptions scored -0.98 to -1.12 with base, all comfortably below
-# the old -0.7 cutoff, so all three were wrongly rejected. Short
-# utterances also tend to score more negatively in general (less context
-# for the model to be confident about), independent of model choice.
-# -1.2 is a looser starting point for base — but treat this as still
-# untested: log avg_logprob on a real mix of correct short utterances,
-# correct long ones, and genuinely garbled audio, and set the cutoff
-# just below where the correct ones cluster. Re-tune again if you change
-# model size in the future.
-LOW_CONFIDENCE_THRESHOLD = -1.2
+# IMPORTANT: this threshold is NOT portable across Whisper model sizes —
+# see config/settings.yml (stt.low_confidence_threshold). Re-tune it if
+# you change stt.model; switching "tiny" -> "base" previously shifted
+# the whole score distribution more negative enough that the old cutoff
+# wrongly rejected several CORRECT transcriptions.
+LOW_CONFIDENCE_THRESHOLD = settings["stt"]["low_confidence_threshold"]
 
 CLARIFICATION_MESSAGE = "Sorry, I didn't quite catch that — could you say that again?"
 
@@ -33,8 +27,8 @@ class VoiceSession:
     def __init__(self):
         print("Loading voice system...")
 
-        self.stt = STT("base")
-        self.tts = TTS()
+        self.stt = STT()  # model size comes from config/settings.yml
+        self.tts = TTS()  # voice comes from config/settings.yml
         self.chat = ChatSession()
 
         print("Voice system ready.")

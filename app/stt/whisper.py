@@ -1,6 +1,8 @@
 import time
 from faster_whisper import WhisperModel
 
+from app.config import settings
+
 # Biases decoding toward this vocabulary without any extra latency cost.
 # Whisper's initial_prompt works best as a natural sentence resembling
 # real transcript context, not a bare keyword list — this is what's
@@ -21,7 +23,8 @@ DOMAIN_VOCAB_PROMPT = (
 
 
 class STT:
-    def __init__(self, model_size="tiny"):
+    def __init__(self, model_size=None):
+        model_size = model_size or settings["stt"]["model"]
         print(f"Loading Whisper model ({model_size})...")
         start = time.perf_counter()
 

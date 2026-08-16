@@ -17,6 +17,8 @@ def init_db():
             company TEXT,
             sector TEXT,
             requirements TEXT,
+            quantity INTEGER,
+            brands TEXT,
             location TEXT,
             callback_time TEXT,
             status TEXT,
@@ -39,23 +41,27 @@ def save_call(data):
             company,
             sector,
             requirements,
+            quantity,
+            brands,
             location,
             callback_time,
             status,
             transcript,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     """, (
         data.get("phone"),
         data.get("name"),
         data.get("company"),
         data.get("sector"),
         data.get("requirements"),
+        data.get("quantity"),
+        data.get("brands"),
         data.get("location"),
         data.get("callback_time"),
         data.get("status"),
-        data.get("transcript")
+        data.get("transcript"),
     ))
 
     conn.commit()

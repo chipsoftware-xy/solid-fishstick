@@ -1,9 +1,27 @@
 llm:
   provider: ollama
   model: gemma3:4b
+  temperature: 0.3
+  num_predict: 55
+  num_ctx: 3072
+  keep_alive: -1
 
 stt:
-  model: small
+  model: base
+  low_confidence_threshold: -1.2
 
 tts:
-  voice: models/piper/voices/en_US-amy-medium.onnx
+  voice: en_US-lessac-high
+
+audio:
+  sample_rate: 16000
+  target_peak: 26000
+  max_gain: 8.0
+  silence_pad_ms: 300
+  vad_aggressiveness: 2
+  vad_frame_ms: 30
+  vad_preroll_ms: 300
+  vad_silence_ms: 800
+  vad_min_speech_ms: 300
+  vad_min_rms: 150
+  vad_max_utterance_ms: 20000

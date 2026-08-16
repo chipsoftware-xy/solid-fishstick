@@ -5,6 +5,7 @@ from app.knowledge_base import KnowledgeBase
 from app.conversation.controller import ConversationController
 import time
 import re
+import difflib
 import json
 import uuid
 import datetime
@@ -123,6 +124,18 @@ def _normalize(text: str) -> str:
     return _PUNCT_RE.sub("", text.strip().lower())
 
 
+def _contains_phrase(text: str, phrases: set) -> bool:
+    """
+    Word-boundary-aware "does this phrase appear anywhere in the text"
+    check — catches natural combinations like "yeah sure of course"
+    (contains both "yeah sure" and "of course" as phrases, but isn't
+    equal to either), which exact-match membership (`clean in phrases`)
+    misses entirely. Uses \\b boundaries rather than naive substring
+    search so "yes" doesn't wrongly match inside "yesterday".
+    """
+    return any(re.search(rf"\b{re.escape(p)}\b", text) for p in phrases)
+
+
 # Filler words/affirmations people drop in front of a spoken answer
 # ("uhh yeah 6pm", "um so 6pm", "uh Rahul"). Stripped from name,
 # organization, and callback-time answers — narrow enough contexts that
@@ -171,9 +184,24 @@ _NAME_PREFIX_RE = re.compile(
 )
 
 
+# Truncates at the first sentence boundary or coordinating conjunction,
+# so a rambling multi-clause answer doesn't all get captured as the
+# name/org value — e.g. "My name is Priya Sharma, and the best contact
+# number is 5550123" should yield just "Priya Sharma", not the whole
+# sentence. Word-boundary matched, so "Andy" isn't split on "and".
+_CLAUSE_BOUNDARY_RE = re.compile(
+    r"[.!?]|,?\s+\b(?:and|so|but)\b", re.IGNORECASE
+)
+
+
+def _first_clause(text: str) -> str:
+    return _CLAUSE_BOUNDARY_RE.split(text, maxsplit=1)[0].strip()
+
+
 def _extract_name_answer(text: str) -> str:
-    stripped = _NAME_PREFIX_RE.sub("", text.strip()).rstrip(".,!?").strip()
-    cleaned = _clean_spoken_text(stripped) if stripped else _clean_spoken_text(text)
+    clause = _first_clause(text.strip())
+    stripped = _NAME_PREFIX_RE.sub("", clause).rstrip(".,!?").strip()
+    cleaned = _clean_spoken_text(stripped) if stripped else _clean_spoken_text(clause)
     return cleaned or text.strip()
 
 
@@ -185,10 +213,31 @@ _ORG_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Fallback for when the org appears mid-sentence rather than as a clean
+# leading prefix — "I'm Colleen from APEC Solutions" doesn't match
+# _ORG_PREFIX_RE at all (starts with "I'm Colleen", not a recognized
+# prefix), so without this the whole clause would be used as-is.
+_FROM_ANYWHERE_RE = re.compile(
+    r"\bfrom\s+([A-Za-z0-9&.\-]+(?:\s+[A-Za-z0-9&.\-]+){0,3})",
+    re.IGNORECASE,
+)
+
 
 def _extract_org_answer(text: str) -> str:
-    stripped = _ORG_PREFIX_RE.sub("", text.strip()).rstrip(".,!?").strip()
-    cleaned = _clean_spoken_text(stripped) if stripped else _clean_spoken_text(text)
+    clause = _first_clause(text.strip())
+
+    stripped = _ORG_PREFIX_RE.sub("", clause).rstrip(".,!?").strip()
+    if stripped != clause:
+        # A leading prefix actually matched and was stripped.
+        cleaned = _clean_spoken_text(stripped) if stripped else _clean_spoken_text(clause)
+        return cleaned or text.strip()
+
+    # No leading prefix — look for "from X" anywhere in the clause.
+    from_match = _FROM_ANYWHERE_RE.search(clause)
+    if from_match:
+        return _clean_spoken_text(from_match.group(1).strip())
+
+    cleaned = _clean_spoken_text(clause)
     return cleaned or text.strip()
 
 
@@ -196,10 +245,24 @@ def _extract_org_answer(text: str) -> str:
 # rather than blindly accepting whatever text came out of STT (garbled
 # audio was previously being read back verbatim as the scheduled time,
 # e.g. "contact you at Try this experience.."). Deliberately permissive
-# — this only needs to catch clearly-not-a-time garbage, not validate
-# real time formats precisely.
+# for genuine time phrasing, but NOT for bare digits — that was a real
+# bug: a plain \d matched ANY digit anywhere in the sentence, so "we
+# need around 5000 cards" (a quantity, not a time) satisfied it just
+# because "5000" contains digits. Real time expressions have digits in
+# a recognizable context — next to am/pm, in HH:MM form, or right after
+# "at" — a bare 3+ digit number never does. Restricting to \d{1,2} in
+# those specific contexts rejects quantities/prices/addresses while
+# still catching "7pm", "3:30", "at 5", etc.
+#
+# Also no bare "am"/"pm" WORD match — "am" is an ordinary English word
+# ("I am asking about..."), and \bam\b matched it regardless of
+# context. Genuine time expressions always pair am/pm directly with a
+# digit, which the patterns below already require.
 _TIME_SIGNAL_RE = re.compile(
-    r"\d|am\b|pm\b|a\.m|p\.m|morning|afternoon|evening|tonight|noon|"
+    r"\b\d{1,2}(:\d{2})?\s*(a\.?m\.?|p\.?m\.?)\b|"  # 7pm, 7:30pm, 7 a.m.
+    r"\b\d{1,2}:\d{2}\b|"  # 7:30
+    r"\bat\s+\d{1,2}\b|"  # "at 5", "at 3"
+    r"morning|afternoon|evening|tonight|noon|"
     r"midnight|today|tomorrow|monday|tuesday|wednesday|thursday|friday|"
     r"saturday|sunday|o'?clock",
     re.IGNORECASE,
@@ -208,6 +271,172 @@ _TIME_SIGNAL_RE = re.compile(
 
 def _looks_like_time(text: str) -> bool:
     return bool(_TIME_SIGNAL_RE.search(text))
+
+
+def _extract_time_phrase(text: str) -> str:
+    """
+    Extracts just the time-relevant portion of a longer sentence instead
+    of using the whole thing verbatim — "thank you, I appreciate that,
+    I'll be ready after 2pm then" should yield "after 2pm", not the
+    entire sentence. Falls back to the fully cleaned text if no time
+    signal is found (shouldn't happen if _looks_like_time already
+    passed, but keeps this safe to call standalone).
+    """
+    match = _TIME_SIGNAL_RE.search(text)
+    if not match:
+        return _clean_spoken_text(text)
+
+    words = text.split()
+    char_pos = 0
+    match_word_idx = 0
+    for i, word in enumerate(words):
+        char_pos += len(word) + 1
+        if char_pos > match.start():
+            match_word_idx = i
+            break
+
+    start = max(0, match_word_idx - 2)
+    end = min(len(words), match_word_idx + 3)
+    window = " ".join(words[start:end]).strip(" ,.!?")
+    return _clean_spoken_text(window)
+
+
+# Words STT sometimes garbles a name into that clearly aren't names —
+# catches cases like "Not" (as seen in testing: mis-heard audio ending up
+# stored as the customer's literal name). Deliberately narrow: only
+# rejects when the ENTIRE answer is a single one of these words, since a
+# real name could legitimately contain "So" or "Ok" as a nickname/part
+# of a longer name and we don't want to reject those.
+_NOT_A_NAME = {
+    "not", "no", "nope", "yes", "yeah", "yep", "what", "who", "sorry",
+    "okay", "ok", "um", "uh", "hello", "hi", "sure",
+    # Common adjectives/states/adverbs that follow "I'm" or "it's" in
+    # ordinary speech but are never names — "I'm pretty flexible",
+    # "it's fine", "I'm really busy". English is genuinely ambiguous
+    # between "I'm [Name]" and "I'm [adjective]" here, so this list
+    # can't be exhaustive — it catches the common offenders, not all.
+    "pretty", "really", "very", "quite", "totally", "fine", "good",
+    "great", "happy", "glad", "busy", "certain", "ready", "flexible",
+    "open", "excited", "confident", "honestly", "just", "still",
+    "also", "here", "there", "done", "afraid", "worried", "interested",
+    "available", "free", "well",
+}
+
+
+def _looks_like_name(text: str) -> bool:
+    words = text.strip().split()
+    if not words:
+        return False
+    if len(words) == 1 and words[0].strip(".,!?").lower() in _NOT_A_NAME:
+        return False
+    return True
+
+
+# Symmetric to _NOT_A_NAME, for the organization field — nothing
+# previously validated this at all (a bare "One." got stored as the
+# literal company name). Includes number words since a stray digit/count
+# ("One", "1") is a common STT mis-hearing of something else entirely,
+# not a plausible company name on its own.
+_NOT_AN_ORG = _NOT_A_NAME | {
+    "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten",
+}
+
+
+def _looks_like_org(text: str) -> bool:
+    words = text.strip().split()
+    if not words:
+        return False
+    if len(words) == 1 and words[0].strip(".,!?").lower() in _NOT_AN_ORG:
+        return False
+    return True
+
+
+# Catches the customer answering a direct question (name/org) with
+# ANOTHER question instead — e.g. "where's your office?" in response to
+# "may I get your name?" — which previously got stored as if it were the
+# actual answer (customer_name literally became "Where is your office").
+# Must be checked against the RAW user_message, before any cleanup
+# strips the trailing "?" or the leading question word.
+_QUESTION_STARTERS = (
+    "where", "what", "who", "why", "how", "when", "which",
+    "can you", "do you", "are you", "is it", "could you", "will you",
+)
+
+
+def _looks_like_a_question(raw_text: str) -> bool:
+    stripped = raw_text.strip()
+    if stripped.endswith("?"):
+        return True
+    lowered = stripped.lower()
+    return any(lowered.startswith(starter) for starter in _QUESTION_STARTERS)
+
+
+# Lets the customer correct a mis-heard name/organization at ANY point
+# in the call, not just during the dedicated question — e.g. "actually
+# it's Alex, not Ali". Only checked once self.customer_name /
+# self.customer_organization is already set (see the gating in
+# _try_fast_path), so this never fires during the initial collection
+# question, which is handled separately by _extract_name_answer.
+_NAME_CORRECTION_RE = re.compile(
+    r"\b(?:my name is|call me|it'?s|i'?m)\s+([a-zA-Z]+)",
+    re.IGNORECASE,
+)
+_ORG_CORRECTION_RE = re.compile(
+    r"\b(?:i'?m calling from|we'?re calling from|calling from|"
+    r"my company is|my organization is|it'?s)\s+([A-Za-z0-9&.\- ]+?)"
+    r"(?:[.,!?]|$)",
+    re.IGNORECASE,
+)
+
+
+def _detect_name_correction(text: str):
+    match = _NAME_CORRECTION_RE.search(text)
+    return match.group(1).strip() if match else None
+
+
+def _detect_org_correction(text: str):
+    match = _ORG_CORRECTION_RE.search(text)
+    return match.group(1).strip() if match else None
+
+
+# Catches a BARE negation with no replacement — "my name isn't that" /
+# "that's not my name" — as distinct from a correction ("it's Alex"),
+# which _detect_name_correction already handles. A bare negation has
+# nothing for that regex to extract (note: "isn't" also has no space
+# after "is", so "my name is X" doesn't even match it as a prefix), so
+# it was previously silently falling through to a generic LLM reply
+# with the wrong name left in place uncorrected. Checked against
+# `clean` (already lowercased/apostrophe-stripped by _normalize), not
+# raw text.
+_NAME_NEGATION_RE = re.compile(
+    r"\bmy name (?:is ?not|isnt)\b|\bthats not my name\b|"
+    r"\bthat is not my name\b|\bnot my name\b|\bwrong name\b"
+)
+
+
+def _is_name_negation_without_replacement(clean_text: str) -> bool:
+    return bool(_NAME_NEGATION_RE.search(clean_text))
+
+
+# STT frequently mangles short affirmations/rejections into nonsense
+# ("Yashur", "Yashore" for "yeah sure") — an exact-match check sends
+# these to a full ~15-20s LLM call for what should be an instant
+# deterministic response, and it can take several tries before one
+# happens to transcribe cleanly enough to match. Fuzzy-matching short
+# inputs against the known target phrases catches most of these without
+# a real fix to STT itself. Deliberately restricted to short inputs
+# (<=3 words) to avoid ever mismatching a genuine, longer sentence.
+def _fuzzy_match_short_phrase(clean_text: str, targets: set, threshold: float = 0.6):
+    words = clean_text.split()
+    if not words or len(words) > 3:
+        return None
+    best, best_ratio = None, 0.0
+    for target in targets:
+        ratio = difflib.SequenceMatcher(None, clean_text, target).ratio()
+        if ratio > best_ratio:
+            best_ratio, best = ratio, target
+    return best if best_ratio >= threshold else None
 
 
 # Splits a stream of text deltas into complete sentences as soon as
@@ -279,7 +508,10 @@ class ChatSession:
 
         self.customer_name = None
         self.customer_organization = None
+        self.customer_callback_time = None
         self._time_retry_count = 0
+        self._name_retry_count = 0
+        self._org_retry_count = 0
         self._pending_callback_time = None
 
         # Brand mentioned in the CURRENT turn (set in _build_llm_messages,
@@ -363,6 +595,84 @@ class ChatSession:
             self.call_started = True
             return self._reply(OPENING_MESSAGE)
 
+        # Let the customer correct a mis-heard name/org at ANY point,
+        # not just during the dedicated question. Gated on the field
+        # already being set, so this never intercepts the initial
+        # collection question itself (self.customer_name is still None
+        # at that point, handled separately by _extract_name_answer).
+        if self.customer_name and (
+            "my name is" in clean
+            or "call me" in clean
+            or "actually" in clean
+            or "correction" in clean
+            or "not " in clean
+        ):
+            corrected = _detect_name_correction(user_message)
+            if (
+                corrected
+                and _looks_like_name(corrected)
+                and corrected.lower() != self.customer_name.lower()
+            ):
+                self.customer_name = corrected.title()
+                self.controller.set_contact_details(
+                    self.customer_name, self.customer_organization
+                )
+                return self._reply(
+                    f"Got it — I've updated your name to {self.customer_name}."
+                )
+            if _is_name_negation_without_replacement(clean):
+                # They rejected the stored name but didn't say what it
+                # should be instead — ask, rather than silently doing
+                # nothing and leaving the wrong name in place.
+                self.customer_name = None
+                self.waiting_for_name = True
+                return self._reply("Sorry about that — what's your actual name?")
+
+        if self.customer_organization and (
+            "my organization is" in clean
+            or "my company is" in clean
+            or "calling from" in clean
+            or "actually" in clean
+            or "correction" in clean
+        ):
+            corrected_org = _detect_org_correction(user_message)
+            if (
+                corrected_org
+                and _looks_like_org(corrected_org)
+                and corrected_org.lower() != self.customer_organization.lower()
+            ):
+                self.customer_organization = corrected_org
+                self.controller.set_contact_details(
+                    self.customer_name, self.customer_organization
+                )
+                return self._reply(
+                    f"Got it — I've updated your organization to "
+                    f"{self.customer_organization}."
+                )
+
+        # Same idea for the callback time — e.g. after Spark has already
+        # confirmed a time, "actually not that time, make it 7pm" or
+        # "wrong time, change it to tomorrow morning" should update it,
+        # not just get spoken back and forgotten. Gated on a time
+        # already being confirmed AND the new text actually looking like
+        # a time (see _looks_like_time), so "actually" alone mid-
+        # conversation about something unrelated doesn't misfire.
+        if self.customer_callback_time and (
+            "actually" in clean
+            or "not this time" in clean
+            or "wrong time" in clean
+            or "change the time" in clean
+            or "correction" in clean
+            or "instead" in clean
+        ) and _looks_like_time(user_message):
+            new_time = _extract_time_phrase(user_message)
+            if new_time and new_time.lower() != self.customer_callback_time.lower():
+                self.customer_callback_time = new_time
+                self.controller.set_callback_time(new_time)
+                return self._reply(
+                    f"Got it — I've updated the callback time to {new_time}."
+                )
+
         if any(phrase in clean for phrase in {
             "what is this about",
             "whats this about",
@@ -394,13 +704,26 @@ class ChatSession:
         # Callback confirmation response
         if self.waiting_for_callback_confirmation:
 
-            if clean in SPECIALIST_YES_PHRASES:
+            # Contains-match first (catches natural phrasing like "yeah
+            # sure of course" that exact-match membership misses
+            # entirely, since it isn't equal to any single phrase in the
+            # set); fuzzy match as a second fallback specifically for
+            # garbled short STT output ("Yashur", "Yashore" for "yeah
+            # sure") that doesn't contain a clean matching phrase at
+            # all. Without either, each garbled/naturally-phrased
+            # attempt costs a full ~15-20s LLM call for what should be
+            # an instant response.
+            if _contains_phrase(clean, SPECIALIST_YES_PHRASES) or _fuzzy_match_short_phrase(
+                clean, SPECIALIST_YES_PHRASES
+            ):
                 self.waiting_for_callback_confirmation = False
                 self.waiting_for_name = True
                 self.controller.start_scheduling()
                 return self._reply("Great. May I get your name?")
 
-            if clean in REJECTION_PHRASES:
+            if _contains_phrase(clean, REJECTION_PHRASES) or _fuzzy_match_short_phrase(
+                clean, REJECTION_PHRASES
+            ):
                 self.waiting_for_callback_confirmation = False
                 self.controller.reject()
                 return self._reply("No problem, thank you for your time!")
@@ -417,21 +740,83 @@ class ChatSession:
                 # separate time question just gets skipped since we
                 # already have it.
                 self.waiting_for_callback_confirmation = False
-                self._pending_callback_time = _clean_spoken_text(user_message)
+                self._pending_callback_time = _extract_time_phrase(user_message)
                 self.waiting_for_name = True
                 self.controller.start_scheduling()
                 return self._reply("Great. May I get your name?")
 
         # Name and organization — two separate deterministic questions.
         if self.waiting_for_name:
+            if _looks_like_a_question(user_message):
+                self._name_retry_count += 1
+                if self._name_retry_count >= 2:
+                    self.waiting_for_name = False
+                    self.waiting_for_organization = True
+                    return self._reply(
+                        "No worries — and which organization are you "
+                        "calling from?"
+                    )
+                return self._reply(
+                    "I'll get to that in just a moment — first, could I "
+                    "get your name?"
+                )
+
+            name_candidate = _extract_name_answer(user_message)
+
+            if not _looks_like_name(name_candidate):
+                self._name_retry_count += 1
+                if self._name_retry_count >= 2:
+                    # Give up gracefully rather than looping — proceed
+                    # without a name rather than trapping the customer.
+                    self.waiting_for_name = False
+                    self.waiting_for_organization = True
+                    return self._reply(
+                        "No worries — and which organization are you "
+                        "calling from?"
+                    )
+                return self._reply(
+                    "Sorry, I didn't catch your name — could you say "
+                    "that again?"
+                )
+
             self.waiting_for_name = False
-            self.customer_name = _extract_name_answer(user_message)
+            self.customer_name = name_candidate
             self.waiting_for_organization = True
             return self._reply("Thanks. And which organization are you calling from?")
 
         if self.waiting_for_organization:
+            if _looks_like_a_question(user_message):
+                self._org_retry_count += 1
+                if self._org_retry_count >= 2:
+                    self.waiting_for_organization = False
+                    self.waiting_for_callback_time = True
+                    return self._reply(
+                        "No worries — what time would you prefer for "
+                        "the callback?"
+                    )
+                return self._reply(
+                    "I'll get to that shortly — first, which "
+                    "organization are you calling from?"
+                )
+
+            org_candidate = _extract_org_answer(user_message)
+
+            if not _looks_like_org(org_candidate):
+                self._org_retry_count += 1
+                if self._org_retry_count >= 2:
+                    self.waiting_for_organization = False
+                    self.waiting_for_callback_time = True
+                    return self._reply(
+                        "No worries — what time would you prefer for "
+                        "the callback?"
+                    )
+                return self._reply(
+                    "Sorry, I didn't catch that — which organization "
+                    "are you calling from?"
+                )
+
             self.waiting_for_organization = False
-            self.customer_organization = _extract_org_answer(user_message)
+            self.customer_organization = org_candidate
             self.controller.set_contact_details(self.customer_name, self.customer_organization)
 
             if self._pending_callback_time:
@@ -439,6 +824,7 @@ class ChatSession:
                 # (see the safety net above) — skip asking again.
                 callback_time = self._pending_callback_time
                 self._pending_callback_time = None
+                self.customer_callback_time = callback_time
                 self.controller.set_callback_time(callback_time)
                 self.controller.close()
                 name_part = f"{self.customer_name}, " if self.customer_name else ""
@@ -467,9 +853,7 @@ class ChatSession:
                     self.customer_name, self.customer_organization
                 )
 
-            callback_time = _clean_spoken_text(remaining_text)
-
-            if not _looks_like_time(callback_time):
+            if not _looks_like_time(remaining_text):
                 self._time_retry_count += 1
                 if self._time_retry_count >= 2:
                     # Cap retries so a customer isn't trapped in a loop
@@ -490,6 +874,8 @@ class ChatSession:
                 )
 
             self.waiting_for_callback_time = False
+            callback_time = _extract_time_phrase(remaining_text)
+            self.customer_callback_time = callback_time
             self.controller.set_callback_time(callback_time)
             self.controller.close()
 

@@ -2,19 +2,15 @@ import os
 import time
 from ollama import Client
 
-# Pin the model in memory between calls. Default keep_alive is 5 minutes;
-# if a real call ever has a longer pause than that (or your dev loop does
-# between tests), the model unloads and the next request eats a full
-# reload on top of everything else. -1 (as an int, not a string — Ollama
-# expects a Go duration string like "30m" if you use a string) keeps it
-# loaded indefinitely for the life of the Ollama server.
-KEEP_ALIVE = -1
+from app.config import settings
+
+_LLM_SETTINGS = settings["llm"]
 
 
 class LLM:
-    def __init__(self, model="gemma3:4b"):
+    def __init__(self, model=None):
         self.client = Client()
-        self.model = model
+        self.model = model or _LLM_SETTINGS["model"]
 
         # Use all available CPU cores. Ollama doesn't always default to
         # this on its own, and on CPU-only hardware this is usually the
@@ -28,24 +24,17 @@ class LLM:
         # one "context" and then paying a reload penalty on the very
         # first real request when the options didn't match.
         self.options = {
-            "temperature": 0.3,
-            # ~35 words is roughly 45-55 tokens for English; capped a
-            # little above that as a hard backstop, not because the
-            # reminder alone reliably keeps replies short (it doesn't —
-            # 3-4 sentence, ~70-token replies showed up in testing
-            # despite the "under 35 words" instruction).
-            "num_predict": 55,
+            "temperature": _LLM_SETTINGS["temperature"],
+            "num_predict": _LLM_SETTINGS["num_predict"],
             "num_thread": num_thread,
-            # Matches your typical prompt size (~1200-1600 tokens with
-            # history + knowledge) plus headroom for the reply, instead
-            # of Ollama's default context window — avoids allocating
-            # more KV cache than you need on constrained hardware, while
-            # leaving margin so a longer exchange doesn't get silently
-            # truncated.
-            "num_ctx": 3072,
+            "num_ctx": _LLM_SETTINGS["num_ctx"],
         }
+        # -1 keeps the model loaded indefinitely between calls (as an
+        # int, not a string — Ollama expects a Go duration string like
+        # "30m" if you use a string instead).
+        self.keep_alive = _LLM_SETTINGS["keep_alive"]
 
-        print(f"Loading {model}...")
+        print(f"Loading {self.model}...")
 
         # Warm up with the REAL static system prompt, not a throwaway
         # message — warming with something unrelated (e.g. just "Hi")
@@ -62,7 +51,7 @@ class LLM:
                 {"role": "system", "content": warmup_system_prompt},
                 {"role": "user", "content": "Hi"},
             ],
-            keep_alive=KEEP_ALIVE,
+            keep_alive=self.keep_alive,
             options=self.options,
         )
 
@@ -73,7 +62,7 @@ class LLM:
         response = self.client.chat(
             model=self.model,
             messages=messages,
-            keep_alive=KEEP_ALIVE,
+            keep_alive=self.keep_alive,
             options=self.options,
         )
         end = time.perf_counter()
@@ -114,7 +103,7 @@ class LLM:
         stream = self.client.chat(
             model=self.model,
             messages=messages,
-            keep_alive=KEEP_ALIVE,
+            keep_alive=self.keep_alive,
             options=self.options,
             stream=True,
         )
