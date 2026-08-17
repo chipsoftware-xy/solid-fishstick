@@ -5,13 +5,15 @@ llm:
   num_predict: 55
   num_ctx: 3072
   keep_alive: -1
+  stall_threshold_seconds: 4.0
+  stall_phrase: "Just a moment, let me check that for you."
 
 stt:
   model: base
   low_confidence_threshold: -1.2
 
 tts:
-  voice: en_US-lessac-high
+  voice: en_IN-dataset3Dljspeech-epochs%3D1089
 
 audio:
   sample_rate: 16000

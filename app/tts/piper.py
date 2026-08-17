@@ -1,9 +1,9 @@
 from pathlib import Path
+import re
 import time
 import wave
 
 from piper.voice import PiperVoice
-import re
 
 from app.config import settings
 from app.utils.text_cleaner import clean_for_tts
@@ -36,10 +36,32 @@ VOICES_DIR = Path("models/piper/voices")
 #   Invoke-WebRequest -Uri <url> -OutFile <path>
 
 
+def _replace_preserving_case(pattern: str, replacement: str, text: str) -> str:
+    """Word-boundary regex replace that keeps the matched word's
+    capitalization — "Great." -> "Wonderful.", "great" -> "wonderful"."""
+    def repl(m):
+        matched = m.group(0)
+        if matched[0].isupper():
+            return replacement[0].upper() + replacement[1:]
+        return replacement
+    return re.sub(pattern, repl, text, flags=re.IGNORECASE)
+
+
 def _prepare_text(text: str) -> str:
     # Improve pronunciation for TTS without changing the actual transcript.
     text = text.replace("RFID", "R F I D")
+    # Opposite problem from RFID: "PAN" here is a real word ("pan-India"
+    # = across India), not an acronym — but Piper/espeak reads short
+    # all-caps tokens as spelled-out letters by default ("P A N India").
+    # Normalizing the case stops it from being treated as an acronym.
     text = re.sub(r"\bPAN\s+India\b", "Pan India", text, flags=re.IGNORECASE)
+    # espeak reads "MI-" as a short-i prefix (like "mirror") instead of
+    # the long-I "My" sound MIFARE actually uses. Splitting it so "My"
+    # reads as the standalone word pushes it toward the right sound.
+    text = re.sub(r"\bmifare\b", "My-fare", text, flags=re.IGNORECASE)
+    # This specific voice model consistently mispronounces "great" —
+    # swap it for a synonym rather than fight the model's training data.
+    text = _replace_preserving_case(r"\bgreat\b", "wonderful", text)
     return text
 
 

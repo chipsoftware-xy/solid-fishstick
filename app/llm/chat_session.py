@@ -3,13 +3,18 @@ from app.llm.prompts import SYSTEM_PROMPT, OPENING_MESSAGE
 from app.llm.knowledge_prompts import EMPLOYEE_ID_PROMPT
 from app.knowledge_base import KnowledgeBase
 from app.conversation.controller import ConversationController
+from app.config import settings
 import time
 import re
 import difflib
 import json
 import uuid
 import datetime
+import threading
 from pathlib import Path
+
+_STALL_THRESHOLD_SECONDS = settings["llm"]["stall_threshold_seconds"]
+_STALL_PHRASE = settings["llm"]["stall_phrase"]
 
 TRANSCRIPT_DIR = Path("transcripts")
 TRANSCRIPT_DIR.mkdir(exist_ok=True)
@@ -474,6 +479,25 @@ def _looks_like_a_question(raw_text: str) -> bool:
     return any(lowered.startswith(starter) for starter in _QUESTION_STARTERS)
 
 
+# Catches the customer asking to have details/company info sent to them
+# ("can you send me your details over this number", "text me the
+# profile", "whatsapp me a brochure") — a "send" verb and a "content"
+# noun within a short window of each other, rather than requiring exact
+# phrasing. Reply must stay in FUTURE tense ("we'll send...") per
+# SYSTEM_PROMPT's rule against claiming a message has already been sent
+# — nothing sends anything yet; this only acknowledges the request.
+_SEND_DETAILS_RE = re.compile(
+    r"\b(?:send|share|text|whatsapp|email|forward|message)\b.{0,30}"
+    r"\b(?:details?|info(?:rmation)?|profile|brochure|documents?|"
+    r"catalog(?:ue)?|materials?)\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_to_send_details(raw_text: str) -> bool:
+    return bool(_SEND_DETAILS_RE.search(raw_text))
+
+
 # Lets the customer correct a mis-heard name/organization at ANY point
 # in the call, not just during the dedicated question — e.g. "actually
 # it's Alex, not Ali". Only checked once self.customer_name /
@@ -814,6 +838,12 @@ class ChatSession:
                 "I wanted to see if any of these areas are relevant to your business."
             )
 
+        if _asks_to_send_details(user_message):
+            return self._reply(
+                "Yes, absolutely — we'll send over our company details "
+                "and profile to this number after the call."
+            )
+
         # Rejection
         if clean in REJECTION_PHRASES:
             self.controller.reject()
@@ -868,6 +898,21 @@ class ChatSession:
                 self.waiting_for_name = True
                 self.controller.start_scheduling()
                 return self._reply("Great. May I get your name?")
+
+            # None of the above matched — the customer didn't answer
+            # yes/no/time, they've moved on to something else (a new
+            # question, a new topic). Clear the flag rather than
+            # leaving it stuck True indefinitely across future turns,
+            # which was silently accumulating specialist_offer_count
+            # every time the model happened to re-offer — treating a
+            # customer asking three different good questions in a row
+            # as if they'd ignored the same offer three times, and
+            # cutting off an actively engaged conversation. A genuine
+            # new question resets the "count" of ignored offers, since
+            # it isn't one.
+            self.waiting_for_callback_confirmation = False
+            if _looks_like_a_question(user_message):
+                self.specialist_offer_count = 0
 
         # Name and organization — two separate deterministic questions.
         if self.waiting_for_name:
@@ -1251,11 +1296,33 @@ class ChatSession:
         full_sentences = []
         first_sentence_at = None
 
+        # Background timer: if the real first sentence hasn't shown up
+        # within the threshold, play a quick filler so the customer
+        # isn't sitting in dead air on a slow generation. event.wait()
+        # returns immediately (without playing anything) if the real
+        # content arrives before the timeout, instead of a plain sleep
+        # that can't be interrupted.
+        first_sentence_ready = threading.Event()
+
+        def _stall_filler():
+            if not first_sentence_ready.wait(timeout=_STALL_THRESHOLD_SECONDS):
+                self._log("assistant", _STALL_PHRASE)
+                on_sentence(_STALL_PHRASE)
+
+        stall_thread = threading.Thread(target=_stall_filler, daemon=True)
+        stall_thread.start()
+
         for sentence in _stream_to_sentences(self.llm.generate_stream(llm_messages)):
             if first_sentence_at is None:
                 first_sentence_at = time.perf_counter()
                 if DEBUG_TIMING:
                     print(f"[TIMING] Time to first sentence: {first_sentence_at - start:.2f}s")
+                first_sentence_ready.set()
+                # If the filler already started playing, wait for it to
+                # finish before playing real content — audio must never
+                # overlap. If it hasn't started (real content beat the
+                # threshold), this returns immediately.
+                stall_thread.join()
             full_sentences.append(sentence)
             on_sentence(sentence)
 

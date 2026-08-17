@@ -31,6 +31,15 @@ _DEFAULTS = {
         # -1 keeps the model loaded indefinitely between calls, so a
         # new call doesn't pay a reload penalty.
         "keep_alive": -1,
+        # If the first sentence of a reply hasn't arrived within this
+        # many seconds, play a short filler phrase ("just a moment...")
+        # so the customer isn't sitting in dead air — gemma3:4b can take
+        # 10+ seconds on a cold/uncached prompt. Untested starting
+        # point; if fillers fire on turns that were going to be fast
+        # anyway, raise this. If customers are hearing long silence
+        # before the filler kicks in, lower it.
+        "stall_threshold_seconds": 4.0,
+        "stall_phrase": "Just a moment, let me check that for you.",
     },
     "stt": {
         "model": "base",
@@ -40,7 +49,7 @@ _DEFAULTS = {
         "low_confidence_threshold": -1.2,
     },
     "tts": {
-        "voice": "en_US-lessac-high",
+        "voice": "en_IN-dataset3Dljspeech-epochs%3D1089",
     },
     "audio": {
         "sample_rate": 16000,

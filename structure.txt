@@ -1,31 +1,102 @@
-__init__
-    ↓
-send()
-    ↓
-empty
-    ↓
-opening
-    ↓
-"what is this about"
-    ↓
-rejection
-    ↓
-busy
-    ↓
-callback confirmation
-    ↓
-callback time
-    ↓
-add user message
-    ↓
-knowledge search
-    ↓
-build llm_messages
-    ↓
-LLM
-    ↓
-detect specialist invitation
-    ↓
-store response
-    ↓
-return
+# Spark — Architecture Reference
+
+## What this is
+
+Spark is a local, voice-based AI sales caller: it listens on a microphone, transcribes speech, decides what to say using a local LLM, speaks the reply back, and — deterministically, not via the LLM — collects a name, organization, and callback time before ending the call and saving a structured record. Everything currently runs against your own mic/speakers; no telephony is wired in yet.
+
+## The core design principle
+
+Two very different tools are doing two very different jobs, on purpose:
+
+- **The LLM (gemma3:4b via Ollama)** handles open-ended conversation — answering questions, reacting to what the customer says, deciding when to offer a specialist. It's good at this because it's flexible, and bad at being *reliable*, because it's a 4B model and will occasionally ignore instructions, invent things, or drift.
+- **Deterministic Python code** handles everything where correctness actually matters: detecting a "yes" to the specialist offer, collecting and validating the name/org/callback time, upselling ribbons when a brand is mentioned, capping repeated asks, ending the call. None of this is left to the model to "remember" to do — it's pattern-matched and validated in code, with the LLM's own output as at most a *fallback signal*, never the sole source of truth.
+
+Nearly every bug fixed in this project traced back to trusting the LLM with something code should have owned instead.
+
+## Directory structure
+
+```
+saleperson/
+├── main.py                        # Entry point — python main.py
+├── config/
+│   └── settings.yml                # All tunable values, in one place
+├── app/
+│   ├── config.py                   # Loads settings.yml, with safe fallback defaults
+│   ├── knowledge_base.py           # RAG over the .md knowledge files (ChromaDB)
+│   ├── parser.py                   # Extracts structured fields from a saved transcript
+│   ├── call_storage.py             # SQLite persistence (data/spark.db)
+│   ├── call_finalizer.py           # Ties parser + storage + chat state into one record
+│   ├── audio/
+│   │   ├── recording.py            # Mic capture + VAD (auto start/stop, no keypress)
+│   │   └── playback.py             # Local audio playback (winsound)
+│   ├── stt/
+│   │   └── whisper.py              # Speech-to-text (faster-whisper)
+│   ├── tts/
+│   │   └── piper.py                # Text-to-speech (Piper), pronunciation fixes
+│   ├── llm/
+│   │   ├── ollama_client.py        # Wraps Ollama's API, streaming + blocking
+│   │   ├── prompts.py              # SYSTEM_PROMPT, OPENING_MESSAGE
+│   │   ├── knowledge_prompts.py    # EMPLOYEE_ID_PROMPT (campaign-specific rules)
+│   │   └── chat_session.py         # THE BRAIN — state machine + fast paths + LLM calls
+│   ├── conversation/
+│   │   ├── voice_session.py        # Wires STT + ChatSession + TTS together per turn
+│   │   ├── controller.py           # Tracks call stage (greeting/scheduling/closing/...)
+│   │   ├── stages.py               # The ConversationStage enum
+│   │   └── memory.py               # ConversationMemory — name, company, callback_time, etc.
+│   └── utils/
+│       └── text_cleaner.py         # Strips stray markdown before it reaches TTS
+├── knowledge/
+│   ├── employee_id.md              # Actually loaded/searched by knowledge_base.py
+│   └── smart_chip.md               # NOT currently wired into search — see note below
+├── models/piper/voices/            # Downloaded Piper voice files (.onnx + .onnx.json)
+├── audio/{input,output}/           # Recorded/synthesized audio files
+├── transcripts/                    # One .jsonl per call, plus a consolidated summary
+├── data/spark.db                   # Structured call records (SQLite)
+└── scripts/                        # Dev tools: benchmarks, phone-audio simulation, etc.
+```
+
+## A single turn, end to end
+
+1. **`app/audio/recording.py`** listens continuously via `webrtcvad`, auto-detects speech start/stop (no keypress), gain-normalizes and pads the clip, and rejects near-silent "noise" before it ever reaches STT.
+2. **`app/stt/whisper.py`** transcribes it, returning both the text and a confidence score (`avg_logprob`).
+3. **`app/conversation/voice_session.py`** checks that confidence — too low, or empty, and it skips the LLM entirely and asks the customer to repeat themselves (this exists because a confident-sounding LLM will happily invent an answer to garbled input if you let it).
+4. **`app/llm/chat_session.py`** is where the real decision-making happens (see below) — either a fast, deterministic reply, or a call to the LLM.
+5. If it's an LLM turn, the reply streams back sentence-by-sentence. A background timer plays a short "just a moment..." filler if the first sentence takes too long, so the customer isn't sitting in dead air.
+6. **`app/tts/piper.py`** synthesizes each sentence (after stripping stray markdown and fixing known mispronunciations), and **`app/audio/playback.py`** plays it — all before the *next* sentence is even done generating.
+7. Every turn gets logged to that call's `.jsonl` transcript, live, regardless of which path handled it.
+
+## Inside `chat_session.py`: the state machine
+
+This is the most-edited file in the whole project, and its logic runs in a strict priority order on every message:
+
+1. **Opening message** (first turn only, no LLM call).
+2. **Mid-call corrections** — "actually, my name isn't Ali, it's Alex" works at *any point*, not just during the dedicated question, and is validated the same way initial collection is.
+3. **Auto-end-of-call** — once the call has genuinely wrapped up (scheduled or rejected), the next thing the customer says gets a short deterministic goodbye instead of restarting the pitch.
+4. **Deterministic informational replies** — "what is this about," "can you send me your details."
+5. **Rejection / busy** — exact-phrase matched, deliberately conservative since this check runs on every message unconditionally.
+6. **Specialist confirmation** — once Spark has offered a specialist, the next reply is checked against yes/no phrases (with both exact *and* fuzzy matching, since STT often garbles short answers like "yeah sure").
+7. **Name → organization → callback time**, each asked as its own separate question, each extracted by a short, targeted **LLM call** (not regex — regex kept breaking on real conversational phrasing like leading acknowledgments or declarative non-answers), then validated by cheap heuristics before being accepted, with a retry cap so a customer never gets stuck in a loop.
+8. **Everything else** falls through to the full conversational LLM, with the knowledge base and a short "stage reminder" injected right next to the latest message — small models follow instructions placed close to generation far more reliably than ones buried in a long static prompt.
+
+After an LLM reply comes back, several **safety nets** run on it regardless of what the model actually said:
+- Did it offer a specialist? (keyword-matched, since the model paraphrases constantly)
+- Did it mention a printer brand without offering the wholesale ribbon rate? → appended deterministically.
+- Does it sound like a natural closing? → the call gets marked ended even though the model didn't go through the "official" scheduling path.
+- Has a specialist been offered 3+ times with no clear answer? → wrap up gracefully (but only counts non-question replies — a customer asking three genuine follow-up questions in a row doesn't trigger this).
+
+## Data and persistence
+
+- **Live transcript**: every turn (including fast-path replies) is appended to `transcripts/<call_id>.jsonl` as it happens — this is the one place with a complete, unfiltered record.
+- **`call_finalizer.py`** runs once, when a call ends: it prefers `chat_session`'s live-tracked fields (name/org/time — reliable, reflects corrections) over `parser.py`'s regex-based re-scan of the transcript (used only for fields nothing else tracks: requirements, quantity, brands, location), computes status from the actual `controller.stage` rather than guessing from text, and writes one row to `data/spark.db`.
+- **`data/spark.db`** is your queryable source of truth for "which calls happened, what came of them." `view_calls.py` (or a proper DB browser) is how you inspect it.
+
+## Configuration
+
+`config/settings.yml` (loaded via `app/config.py`, with hardcoded fallback defaults so a missing file or key never crashes anything) centralizes every tunable value discovered through testing: LLM model/temperature/context size, STT model size and confidence threshold, TTS voice, and every VAD parameter (aggressiveness, silence duration, RMS floor). Almost none of these are "correct" in any absolute sense — they're starting points that were adjusted against real transcripts, and most will likely need re-tuning again if your hardware, mic, or voice model changes.
+
+## What's genuinely not built yet
+
+- **Telephony.** Nothing connects this to a real phone call. The plan (discussed, not built): Twilio (or similar) for outbound dialing from an Excel sheet of numbers, bridged to this pipeline via Twilio Media Streams — a real-time WebSocket carrying 8kHz mu-law audio, replacing the local mic/speaker layer while `chat_session.py` and everything downstream stays the same.
+- **WhatsApp messaging.** A `phone` field already exists as a placeholder in `call_finalizer.py`, unpopulated until telephony exists to supply it.
+- **Web dashboard.** Discussed as the natural next home for viewing `data/spark.db` and eventually hosting the Twilio webhook endpoints, not started.
+- **`knowledge/smart_chip.md`** — exists but isn't currently searched; only `employee_id.md` is loaded by `knowledge_base.py`.
