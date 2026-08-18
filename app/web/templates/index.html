@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% block content %}
+<main class="landing">
+    <header class="landing__header">
+        <h1 class="landing__title">SparkSCT</h1>
+        <p class="landing__subtitle">Smart Chip Tree&rsquo;s AI Sales Assistant</p>
+    </header>
+
+    <section class="landing__action">
+        <p class="landing__prompt">
+            {% if call_in_progress %}
+                A call is currently in progress.
+            {% else %}
+                Click the button below to start making calls.
+            {% endif %}
+        </p>
+
+        <form method="post" action="{{ url_for('start_call') }}"
+              class="{{ 'hidden' if call_in_progress else '' }}">
+            <button type="submit" class="btn-outline">Start</button>
+        </form>
+
+        <form method="post" action="{{ url_for('stop_call') }}"
+              class="{{ '' if call_in_progress else 'hidden' }}">
+            <button type="submit" class="btn-outline btn-outline--stop">Stop</button>
+        </form>
+
+        <p class="refresh-hint">Refresh the page to see the latest call status.</p>
+
+        <div class="live-transcript">
+            <p class="last-call__label">Live Transcript</p>
+            <div class="transcript" id="live-transcript-box">
+                <p class="transcript__line transcript__placeholder">
+                    No call running. Live transcriptions will activate once you start calling.
+                </p>
+            </div>
+        </div>
+
+        <div class="last-call">
+            {% if latest_call %}
+                <p class="last-call__label">Last call</p>
+                <p class="last-call__line">
+                    {{ latest_call.status }}
+                    &middot; {{ latest_call.name or 'no name' }}
+                    &middot; {{ latest_call.company or 'no company' }}
+                    &middot; {{ latest_call.callback_time or 'no callback time' }}
+                </p>
+            {% else %}
+                <p class="last-call__line">No call yet.</p>
+            {% endif %}
+        </div>
+    </section>
+
+    <footer class="landing__nav">
+        <nav class="nav-column">
+            <h2 class="nav-column__title">Dashboard</h2>
+            <ul class="nav-column__list">
+                <li><a href="{{ url_for('review_conversations') }}">Review Conversations</a></li>
+                <li><a href="{{ url_for('placeholder', name='dataset') }}">Dataset</a></li>
+                <li><a href="{{ url_for('placeholder', name='set-voice') }}">Set Voice</a></li>
+                <li><a href="{{ url_for('placeholder', name='guidelines') }}">Guidelines</a></li>
+            </ul>
+        </nav>
+
+        <nav class="nav-column">
+            <h2 class="nav-column__title">History</h2>
+            <ul class="nav-column__list nav-column__list--wide">
+                <li><a href="{{ url_for('placeholder', name='history') }}">See conversation database categorised by contact number</a></li>
+            </ul>
+        </nav>
+
+        <nav class="nav-column">
+            <h2 class="nav-column__title">Settings</h2>
+            <ul class="nav-column__list">
+                <li><a href="{{ url_for('placeholder', name='message-api') }}">message api</a></li>
+                <li><a href="{{ url_for('placeholder', name='call-api') }}">call api</a></li>
+            </ul>
+        </nav>
+    </footer>
+
+    <div class="shutdown-row">
+        <form method="post" action="{{ url_for('stop_session') }}"
+              class="{{ 'hidden' if call_in_progress else '' }}">
+            <button type="submit" class="link-muted">Stop Gemma</button>
+        </form>
+
+        <form method="post" action="{{ url_for('shutdown_app') }}"
+              class="{{ 'hidden' if call_in_progress else '' }}"
+              onsubmit="return confirm('Shut down Spark entirely? This closes the whole app, not just the call.');">
+            <button type="submit" class="link-muted">Shut down app</button>
+        </form>
+
+        {% if call_in_progress %}
+            <p class="shutdown-note">Stop the current call to use these.</p>
+        {% endif %}
+    </div>
+</main>
+
+<script>
+    // Escapes text before inserting into the page, so a transcript line
+    // containing "&", "<", etc. can't break the HTML structure.
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    const PLACEHOLDER_HTML =
+        '<p class="transcript__line transcript__placeholder">' +
+        'No call running. Live transcriptions will activate once you start calling.' +
+        '</p>';
+
+    async function pollLiveTranscript() {
+        try {
+            const res = await fetch("{{ url_for('live_transcript') }}");
+            const data = await res.json();
+            const box = document.getElementById('live-transcript-box');
+
+            if (!data.in_progress || data.transcript.length === 0) {
+                box.innerHTML = PLACEHOLDER_HTML;
+                return;
+            }
+
+            box.innerHTML = data.transcript.map(function (turn) {
+                const speaker = turn.role === 'user' ? 'Customer' : 'Spark';
+                return '<p class="transcript__line"><span class="transcript__speaker">'
+                    + speaker + ':</span> ' + escapeHtml(turn.content) + '</p>';
+            }).join('');
+
+            box.scrollTop = box.scrollHeight;
+        } catch (err) {
+            // Transient network hiccup — just try again next interval.
+        }
+    }
+
+    pollLiveTranscript();
+    setInterval(pollLiveTranscript, 2000);
+</script>
+{% endblock %}

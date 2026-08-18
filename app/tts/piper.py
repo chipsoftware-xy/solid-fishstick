@@ -62,6 +62,7 @@ def _prepare_text(text: str) -> str:
     # This specific voice model consistently mispronounces "great" —
     # swap it for a synonym rather than fight the model's training data.
     text = _replace_preserving_case(r"\bgreat\b", "wonderful", text)
+    text = text.replace("AI", "A I")
     return text
 
 

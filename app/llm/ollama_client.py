@@ -57,6 +57,20 @@ class LLM:
 
         print("LLM ready.")
 
+    def unload(self):
+        """
+        Tells Ollama to actually release this model from memory (RAM/
+        VRAM) right now — different from just discarding this Python
+        object, since keep_alive=-1 keeps the model resident in Ollama's
+        own memory indefinitely regardless of what our app does. Sends
+        an empty-messages request with keep_alive=0, which Ollama
+        documents as an immediate unload.
+        """
+        try:
+            self.client.chat(model=self.model, messages=[], keep_alive=0)
+        except Exception as e:
+            print(f"[WARN] Failed to unload model: {e}")
+
     def generate(self, messages):
         start = time.perf_counter()
         response = self.client.chat(

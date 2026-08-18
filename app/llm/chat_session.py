@@ -625,12 +625,20 @@ def _mentioned_printer_brand(user_message: str):
 
 class ChatSession:
 
-    def __init__(self):
+    def __init__(self, llm=None, knowledge=None):
+        """
+        `llm` and `knowledge` can be passed in as already-loaded
+        instances — this is how repeated calls within the same running
+        process (e.g. the web UI's Start button, reused across multiple
+        calls) avoid reloading the model and knowledge base every time.
+        If not given, fresh ones are created (matches the old
+        behavior — fine for a single one-off call, e.g. from the CLI).
+        """
 
         self.waiting_for_callback_confirmation = False
 
-        self.llm = LLM()
-        self.knowledge = KnowledgeBase()
+        self.llm = llm if llm is not None else LLM()
+        self.knowledge = knowledge if knowledge is not None else KnowledgeBase()
         self.call_started = False
         self.call_finished = False
         self.waiting_for_name = False

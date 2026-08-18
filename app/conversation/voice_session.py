@@ -2,6 +2,8 @@ from pathlib import Path
 import time
 
 from app.llm.chat_session import ChatSession
+from app.llm.ollama_client import LLM
+from app.knowledge_base import KnowledgeBase
 from app.stt.whisper import STT
 from app.tts.piper import TTS
 from app.audio.playback import play_wav
@@ -27,11 +29,32 @@ class VoiceSession:
     def __init__(self):
         print("Loading voice system...")
 
+        # These are the genuinely expensive, stateless, reusable-across-
+        # calls resources — loaded once, here, and kept alive for the
+        # lifetime of this VoiceSession. Whisper/Piper/Ollama warmup/
+        # knowledge base each cost real seconds; paying that once per
+        # process instead of once per call is the whole point of
+        # start_new_call() below, which reuses all of this.
         self.stt = STT()  # model size comes from config/settings.yml
         self.tts = TTS()  # voice comes from config/settings.yml
-        self.chat = ChatSession()
+        self._llm = LLM()
+        self._knowledge = KnowledgeBase()
+
+        self.start_new_call()
 
         print("Voice system ready.")
+
+    def start_new_call(self):
+        """
+        Resets everything that's specific to ONE conversation (message
+        history, name/org/time collected, transcript, call-ended flags —
+        all of it lives inside ChatSession) without touching the heavy
+        resources above. Call this to begin a new call on an existing
+        VoiceSession instead of constructing a brand new VoiceSession —
+        that's what actually avoids reloading Whisper/Piper/the LLM for
+        every single call.
+        """
+        self.chat = ChatSession(llm=self._llm, knowledge=self._knowledge)
 
     def process_audio(self, audio_path):
         """
