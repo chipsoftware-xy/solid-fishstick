@@ -57,24 +57,25 @@
             <h2 class="nav-column__title">Dashboard</h2>
             <ul class="nav-column__list">
                 <li><a href="{{ url_for('review_conversations') }}">Review Conversations</a></li>
-                <li><a href="{{ url_for('placeholder', name='dataset') }}">Dataset</a></li>
-                <li><a href="{{ url_for('placeholder', name='set-voice') }}">Set Voice</a></li>
-                <li><a href="{{ url_for('placeholder', name='guidelines') }}">Guidelines</a></li>
+                <li><a href="{{ url_for('dataset') }}">Dataset</a></li>
+                <li><a href="{{ url_for('set_voice') }}">Set Voice</a></li>
+                <li><a href="{{ url_for('call_queue') }}">Call Queue</a></li>
             </ul>
         </nav>
 
         <nav class="nav-column">
             <h2 class="nav-column__title">History</h2>
             <ul class="nav-column__list nav-column__list--wide">
-                <li><a href="{{ url_for('placeholder', name='history') }}">See conversation database categorised by contact number</a></li>
+                <li><a href="{{ url_for('history') }}">See conversation database categorised by contact number</a></li>
             </ul>
         </nav>
 
         <nav class="nav-column">
             <h2 class="nav-column__title">Settings</h2>
             <ul class="nav-column__list">
-                <li><a href="{{ url_for('placeholder', name='message-api') }}">message api</a></li>
-                <li><a href="{{ url_for('placeholder', name='call-api') }}">call api</a></li>
+                <li><a href="{{ url_for('target_audience') }}">Tune Spark</a></li>
+                <li><a href="{{ url_for('guidelines') }}">Guidelines</a></li>
+                <li><a href="{{ url_for('call_api') }}">Call API</a></li>
             </ul>
         </nav>
     </footer>

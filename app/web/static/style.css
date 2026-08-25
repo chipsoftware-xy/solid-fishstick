@@ -283,6 +283,195 @@ body {
     color: var(--fg-muted);
 }
 
+/* ---------- Dataset page ---------- */
+
+.dataset {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 80px 40px 60px;
+    text-align: center;
+}
+
+.queue__upload {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 12px;
+    margin: 24px 0 48px;
+}
+
+.queue__upload select {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    padding: 8px 12px;
+    font-family: inherit;
+    font-size: 0.9rem;
+}
+
+.target__form {
+    max-width: 420px;
+    margin: 0 auto 40px;
+    text-align: left;
+}
+
+.target__option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+    font-size: 0.95rem;
+    font-weight: 300;
+    color: var(--fg-muted);
+    cursor: pointer;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.target__option:hover {
+    color: var(--fg);
+}
+
+.target__other-input {
+    background: var(--bg);
+    color: var(--fg);
+    border: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+    padding: 2px 4px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    flex: 1;
+}
+
+.target__save {
+    display: block;
+    margin: 24px auto 0;
+}
+
+.guidelines__block {
+    text-align: left;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 16px 20px;
+    color: var(--fg-muted);
+    font-family: "Courier New", monospace;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.guidelines__howto {
+    text-align: left;
+}
+
+.guidelines__howto p {
+    color: var(--fg-muted);
+    font-size: 0.9rem;
+    font-weight: 300;
+    line-height: 1.6;
+    margin: 0 0 16px;
+}
+
+.guidelines__howto strong {
+    color: var(--fg);
+    font-weight: 500;
+}
+
+.dataset__section {
+    margin-bottom: 48px;
+    text-align: left;
+}
+
+.dataset__table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.dataset__table th,
+.dataset__table td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    font-size: 0.9rem;
+    font-weight: 300;
+}
+
+.dataset__table th {
+    color: var(--fg-faint);
+    font-weight: 400;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.06em;
+}
+
+.dataset__table td {
+    color: var(--fg-muted);
+}
+
+.dataset__section-title {
+    font-size: 1.1rem;
+    font-weight: 400;
+    margin: 0 0 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+}
+
+.dataset__bulk-btn {
+    background: none;
+    border: 1px solid rgba(255, 120, 120, 0.6);
+    color: rgba(255, 120, 120, 0.85);
+    font-family: inherit;
+    font-size: 0.7rem;
+    padding: 3px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.dataset__bulk-btn:hover {
+    background: rgba(255, 120, 120, 0.85);
+    color: var(--bg);
+}
+
+.dataset__row-delete {
+    background: none;
+    border: none;
+    color: var(--fg-faint);
+    font-family: inherit;
+    font-size: 0.75rem;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    transition: color 0.15s ease, text-decoration-color 0.15s ease;
+}
+
+.dataset__row-delete:hover {
+    color: rgba(255, 120, 120, 0.85);
+    text-decoration-color: rgba(255, 120, 120, 0.85);
+}
+
+.dataset__note {
+    color: var(--fg-faint);
+    font-size: 0.85rem;
+    font-style: italic;
+    margin: 0 0 16px;
+}
+
+.history__checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+}
+
+.history__top-confirm {
+    margin-bottom: 32px;
+}
+
 /* ---------- Review Conversations page ---------- */
 
 .review {

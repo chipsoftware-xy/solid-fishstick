@@ -38,10 +38,23 @@ class STT:
         print(f"Model loaded in {end - start:.2f}s")
 
     def transcribe(self, audio_path):
+        return self._run_transcribe(audio_path)
+
+    def transcribe_array(self, samples):
+        """
+        Same as transcribe(), but for in-memory audio (a numpy float32
+        array, range -1.0 to 1.0, 16kHz) instead of a file path — used
+        for streamed call audio, which arrives as raw bytes over a
+        WebSocket rather than being written to a WAV file first like
+        local mic recordings are.
+        """
+        return self._run_transcribe(samples)
+
+    def _run_transcribe(self, audio):
         start = time.perf_counter()
 
         segments, info = self.model.transcribe(
-            audio_path,
+            audio,
             language="en",
             beam_size=1,
             initial_prompt=DOMAIN_VOCAB_PROMPT,

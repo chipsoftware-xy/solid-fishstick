@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}History — SparkSCT{% endblock %}
+
+{% block content %}
+<main class="review">
+    <p class="placeholder__eyebrow">SparkSCT</p>
+    <h1 class="review__title">History</h1>
+    <p class="placeholder__body">Your scheduled-callback queue. Check off the ones you've called back, then confirm to clear them out.</p>
+
+    {% if calls %}
+        <form method="post" action="{{ url_for('confirm_callbacks_done') }}"
+              onsubmit="return confirm('Clear the checked callbacks? This deletes them permanently.');">
+            <button type="submit" class="btn-outline history__top-confirm">Confirm callbacks done</button>
+
+            {% for call in calls %}
+                <div class="review__item">
+                    <label class="history__checkbox-row">
+                        <input type="checkbox" name="call_ids" value="{{ call.id }}">
+                        <span class="last-call__label">
+                            Call #{{ call.id }} &middot; {{ call.created_at }}
+                            &middot; {{ call.phone or 'no contact number' }}
+                        </span>
+                    </label>
+                    <p class="last-call__line">
+                        {{ call.name or 'no name' }}
+                        &middot; {{ call.company or 'no company' }}
+                        &middot; {{ call.callback_time or 'no callback time' }}
+                    </p>
+
+                    {% if call.transcript %}
+                        <div class="transcript">
+                            {% for turn in call.transcript %}
+                                <p class="transcript__line">
+                                    <span class="transcript__speaker">{{ 'Customer' if turn.role == 'user' else 'Spark' }}:</span>
+                                    {{ turn.content }}
+                                </p>
+                            {% endfor %}
+                        </div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        </form>
+    {% else %}
+        <p class="placeholder__body">No scheduled callbacks right now.</p>
+    {% endif %}
+
+    <a href="{{ url_for('index') }}" class="placeholder__back">&larr; Back</a>
+</main>
+{% endblock %}

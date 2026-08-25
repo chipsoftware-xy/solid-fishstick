@@ -2,7 +2,7 @@ llm:
   provider: ollama
   model: gemma3:4b
   temperature: 0.3
-  num_predict: 55
+  num_predict: 65
   num_ctx: 3072
   keep_alive: -1
   stall_threshold_seconds: 4.0

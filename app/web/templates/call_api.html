@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Call API — SparkSCT{% endblock %}
+
+{% block content %}
+<main class="review">
+    <p class="placeholder__eyebrow">SparkSCT</p>
+    <h1 class="review__title">Call API</h1>
+    <p class="placeholder__body">Exotel credentials used to place outbound calls from Call Queue.</p>
+
+    <form method="post" action="{{ url_for('save_call_api') }}" class="target__form">
+        <label class="target__option">API Key
+            <input type="text" name="api_key" value="{{ settings.get('api_key', '') }}" class="target__other-input">
+        </label>
+        <label class="target__option">API Token
+            <input type="password" name="api_token" value="{{ settings.get('api_token', '') }}" class="target__other-input">
+        </label>
+        <label class="target__option">Account SID
+            <input type="text" name="account_sid" value="{{ settings.get('account_sid', '') }}" class="target__other-input">
+        </label>
+        <label class="target__option">Exophone
+            <input type="text" name="exophone" value="{{ settings.get('exophone', '') }}" class="target__other-input">
+        </label>
+        <label class="target__option">Flow ID
+            <input type="text" name="flow_id" value="{{ settings.get('flow_id', '') }}" class="target__other-input">
+        </label>
+
+        <button type="submit" class="btn-outline target__save">Save</button>
+    </form>
+
+    <a href="{{ url_for('index') }}" class="placeholder__back">&larr; Back</a>
+</main>
+{% endblock %}

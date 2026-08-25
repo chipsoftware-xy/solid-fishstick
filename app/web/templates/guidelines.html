@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Guidelines — SparkSCT{% endblock %}
+
+{% block content %}
+<main class="review">
+    <p class="placeholder__eyebrow">SparkSCT</p>
+    <h1 class="review__title">Guidelines</h1>
+    <p class="placeholder__body">Read-only — what Spark is actually working from right now.</p>
+
+    <section class="dataset__section">
+        <h2 class="dataset__section-title">How to Use Spark</h2>
+        <div class="guidelines__howto">
+            <p><strong>Starting and stopping calls</strong> — Start begins a call; only the very first one reloads everything (Whisper, Piper, Gemma), every call after that reuses what's already loaded. Stop ends the current call after the exchange in progress finishes — it won't cut Spark off mid-sentence.</p>
+            <p><strong>Watching a call happen</strong> — the Live Transcript box on the main page fills in turn by turn while a call is active. Once the call ends, refresh the page to see the "Last call" summary (status, name, company, callback time).</p>
+            <p><strong>Working your scheduled callbacks</strong> — History lists every call that ended with a callback scheduled. Check off the ones you've actually called back, then hit "Confirm callbacks done" to clear them out.</p>
+            <p><strong>Reviewing past calls</strong> — Review Conversations shows the last 5 calls with full transcripts. Dataset shows everything, grouped by outcome (Scheduled / Rejected / Incomplete), with delete controls for cleaning up old data.</p>
+            <p><strong>Choosing what Spark targets</strong> — Tune Spark (under Settings) lets you pick which kind of business Spark is calling on behalf of. Only the Employee ID campaign is fully built right now — the other verticals are on the menu but not wired up yet, coming soon.</p>
+            <p><strong>Changing the voice</strong> — Set Voice picks from whichever Piper voices are downloaded. Changes apply on the next reload — use "Stop Gemma" then Start, or a full restart.</p>
+        </div>
+    </section>
+
+    <section class="dataset__section">
+        <h2 class="dataset__section-title">Opening Message</h2>
+        <pre class="guidelines__block">{{ opening_message }}</pre>
+    </section>
+
+    <section class="dataset__section">
+        <h2 class="dataset__section-title">System Prompt</h2>
+        <pre class="guidelines__block">{{ system_prompt }}</pre>
+    </section>
+
+    <section class="dataset__section">
+        <h2 class="dataset__section-title">Employee ID Campaign Prompt</h2>
+        <pre class="guidelines__block">{{ employee_id_prompt }}</pre>
+    </section>
+
+    <a href="{{ url_for('index') }}" class="placeholder__back">&larr; Back</a>
+</main>
+{% endblock %}

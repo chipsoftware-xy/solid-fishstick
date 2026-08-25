@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block title %}Call Queue — SparkSCT{% endblock %}
+
+{% block content %}
+<main class="review">
+    <p class="placeholder__eyebrow">SparkSCT</p>
+    <h1 class="review__title">Call Queue</h1>
+    <p class="placeholder__body">Upload a spreadsheet with a "phone" or "number" column to add numbers to the queue.</p>
+
+    <form method="post" action="{{ url_for('upload_call_queue') }}" enctype="multipart/form-data" class="queue__upload">
+        <input type="file" name="file" accept=".xlsx,.xls,.csv" required>
+        <button type="submit" class="btn-outline">Upload</button>
+    </form>
+
+    <section class="dataset__section">
+        <h2 class="dataset__section-title">Pending ({{ pending|length }})</h2>
+        {% if pending %}
+            <table class="dataset__table">
+                <thead><tr><th>Phone</th><th>Uploaded</th><th></th></tr></thead>
+                <tbody>
+                    {% for entry in pending %}
+                        <tr>
+                            <td>{{ entry.phone }}</td>
+                            <td>{{ entry.uploaded_at }}</td>
+                            <td>
+                                <form method="post" action="{{ url_for('trigger_call', queue_id=entry.id) }}">
+                                    <input type="hidden" name="phone" value="{{ entry.phone }}">
+                                    <button type="submit" class="btn-outline">Call</button>
+                                </form>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p class="placeholder__body">No numbers waiting right now.</p>
+        {% endif %}
+    </section>
+
+    <section class="dataset__section">
+        <h2 class="dataset__section-title">Calling ({{ calling|length }})</h2>
+        {% if calling %}
+            <table class="dataset__table">
+                <thead><tr><th>Phone</th><th>Uploaded</th></tr></thead>
+                <tbody>
+                    {% for entry in calling %}
+                        <tr><td>{{ entry.phone }}</td><td>{{ entry.uploaded_at }}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p class="placeholder__body">Nothing in progress right now.</p>
+        {% endif %}
+    </section>
+
+    <section class="dataset__section">
+        <h2 class="dataset__section-title">Done ({{ done|length }})</h2>
+        {% if done %}
+            <table class="dataset__table">
+                <thead><tr><th>Phone</th><th>Uploaded</th></tr></thead>
+                <tbody>
+                    {% for entry in done %}
+                        <tr><td>{{ entry.phone }}</td><td>{{ entry.uploaded_at }}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p class="placeholder__body">Nothing completed yet.</p>
+        {% endif %}
+    </section>
+
+    <a href="{{ url_for('index') }}" class="placeholder__back">&larr; Back</a>
+</main>
+{% endblock %}

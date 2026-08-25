@@ -9,12 +9,19 @@ import os
 import sqlite3
 import threading
 import time
+from pathlib import Path
 
-from flask import Flask, render_template, redirect, url_for, flash
+import pandas as pd
+import yaml
+
+from flask import Flask, render_template, redirect, url_for, flash, request
 
 from app.conversation.call_runner import run_call
 from app.conversation.voice_session import VoiceSession
-from app.call_storage import DB_PATH
+from app.call_storage import DB_PATH, delete_call as _delete_call, add_numbers_to_queue, get_queue, set_queue_status
+from telephony.dialer import place_call, ExotelConfigError
+from app.llm.prompts import SYSTEM_PROMPT, OPENING_MESSAGE
+from app.llm.knowledge_prompts import EMPLOYEE_ID_PROMPT
 
 app = Flask(__name__)
 app.secret_key = "spark-local-dev"  # local-only app, no real auth surface
@@ -40,20 +47,24 @@ _stop_event = threading.Event()
 _voice_session = None
 
 
-def _get_recent_calls(limit=5):
+def _fetch_calls(status=None):
     """
-    The most recent calls, most recent first, each with its transcript
-    parsed from JSON into a list the template can loop over. Shared by
-    the main page's "Last call" box (limit=1) and Review Conversations
-    (limit=5), so there's one query instead of two near-duplicates.
+    Base query — all calls (or filtered to one status), most recent
+    first, transcript parsed from JSON into a list. Every other query
+    helper builds on this one, instead of each repeating its own
+    near-identical SQL + parsing.
     """
     if not DB_PATH.exists():
         return []
+
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT * FROM calls ORDER BY id DESC LIMIT ?", (limit,)
-    ).fetchall()
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM calls WHERE status = ? ORDER BY id DESC", (status,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM calls ORDER BY id DESC").fetchall()
     conn.close()
 
     calls = []
@@ -67,6 +78,12 @@ def _get_recent_calls(limit=5):
     return calls
 
 
+def _get_recent_calls(limit=5):
+    """Most recent calls — shared by the main page's "Last call" box
+    (limit=1) and Review Conversations (limit=5)."""
+    return _fetch_calls()[:limit]
+
+
 def _get_latest_call():
     """
     The most recent call — this only exists because finalize_call() ran,
@@ -76,6 +93,25 @@ def _get_latest_call():
     """
     calls = _get_recent_calls(limit=1)
     return calls[0] if calls else None
+
+
+def _get_calls_by_status():
+    """
+    All calls, grouped into the three actual outcome buckets
+    call_finalizer.py produces: scheduled (callback_scheduled), rejected
+    (rejected), and incomplete (everything else — closed_no_callback,
+    scheduling_incomplete, incomplete — calls that ended without a
+    clean resolution).
+    """
+    buckets = {"scheduled": [], "rejected": [], "incomplete": []}
+    for call in _fetch_calls():
+        if call["status"] == "callback_scheduled":
+            buckets["scheduled"].append(call)
+        elif call["status"] == "rejected":
+            buckets["rejected"].append(call)
+        else:
+            buckets["incomplete"].append(call)
+    return buckets
 
 
 def _run_call_and_release():
@@ -213,15 +249,266 @@ def live_transcript():
     return {"in_progress": in_progress, "transcript": transcript}
 
 
+@app.route("/history")
+def history():
+    """
+    Working callback queue — ONLY scheduled calls (not a general
+    history browser, that's what Review Conversations is for). Each
+    entry has a checkbox; checking some and confirming clears them out
+    once you've actually made those callbacks.
+    """
+    return render_template("history.html", calls=_fetch_calls(status="callback_scheduled"))
+
+
+@app.route("/history/confirm-done", methods=["POST"])
+def confirm_callbacks_done():
+    ids = request.form.getlist("call_ids")
+    for call_id in ids:
+        _delete_call(int(call_id))
+    flash(f"Cleared {len(ids)} completed callback(s).")
+    return redirect(url_for("history"))
+
+
 @app.route("/review-conversations")
 def review_conversations():
     """
     Last 5 calls, most recent first, each with its full transcript.
-    Standing in for a proper History page for now — that was meant to
-    be organized by contact number, but there's nothing to categorize
-    by yet since no telephony integration exists to supply one.
+    General browsing — History above is specifically the scheduled-
+    callback working queue, this is everything.
     """
     return render_template("review_conversations.html", calls=_get_recent_calls(limit=5))
+
+
+def _clean_phone_value(val):
+    """
+    Strips the trailing '.0' pandas adds when a phone number column is
+    number-formatted in Excel (919876543210 becomes 919876543210.0 on
+    read) — a common, easy-to-miss corruption if not handled explicitly.
+    """
+    s = str(val).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+@app.route("/call-queue")
+def call_queue():
+    queue = get_queue()
+    pending = [q for q in queue if q["status"] == "pending"]
+    calling = [q for q in queue if q["status"] == "calling"]
+    done = [q for q in queue if q["status"] == "done"]
+    return render_template("call_queue.html", pending=pending, calling=calling, done=done)
+
+
+@app.route("/call-queue/upload", methods=["POST"])
+def upload_call_queue():
+    file = request.files.get("file")
+    if not file or file.filename == "":
+        flash("No file selected.")
+        return redirect(url_for("call_queue"))
+
+    try:
+        df = pd.read_excel(file)
+    except Exception as e:
+        flash(f"Could not read that file: {e}")
+        return redirect(url_for("call_queue"))
+
+    # Accept either "phone" or "number" as the column header, case-insensitive.
+    col = None
+    for candidate in df.columns:
+        if str(candidate).strip().lower() in ("phone", "number"):
+            col = candidate
+            break
+
+    if col is None:
+        flash("Couldn't find a 'phone' or 'number' column in that file.")
+        return redirect(url_for("call_queue"))
+
+    numbers = [_clean_phone_value(n) for n in df[col].dropna().tolist()]
+    numbers = [n for n in numbers if n]
+
+    if not numbers:
+        flash("No phone numbers found in that column.")
+        return redirect(url_for("call_queue"))
+
+    add_numbers_to_queue(numbers)
+    flash(f"Added {len(numbers)} number(s) to the queue.")
+    return redirect(url_for("call_queue"))
+
+
+@app.route("/call-queue/call/<int:queue_id>", methods=["POST"])
+def trigger_call(queue_id):
+    phone = request.form.get("phone")
+    if not phone:
+        flash("No phone number given.")
+        return redirect(url_for("call_queue"))
+
+    try:
+        place_call(phone, _get_exotel_settings())
+    except ExotelConfigError as e:
+        flash(str(e))
+        return redirect(url_for("call_queue"))
+    except Exception as e:
+        # Leaves status as "pending" on failure — safe to retry, matches
+        # how every other retryable action in this app behaves.
+        flash(f"Call failed to place: {e}")
+        return redirect(url_for("call_queue"))
+
+    set_queue_status(queue_id, "calling")
+    flash(f"Calling {phone}.")
+    return redirect(url_for("call_queue"))
+
+
+SETTINGS_PATH = Path("config/settings.yml")
+
+
+def _get_available_voices():
+    """Scans models/piper/voices/ for downloaded voice files — each
+    voice is a .onnx + .onnx.json pair, named by the voice's own name."""
+    voices_dir = Path("models/piper/voices")
+    if not voices_dir.exists():
+        return []
+    return sorted(p.stem for p in voices_dir.glob("*.onnx"))
+
+
+def _get_current_voice():
+    if not SETTINGS_PATH.exists():
+        return None
+    with open(SETTINGS_PATH) as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("tts", {}).get("voice")
+
+
+def _set_voice(new_voice):
+    with open(SETTINGS_PATH) as f:
+        data = yaml.safe_load(f) or {}
+    data.setdefault("tts", {})["voice"] = new_voice
+    with open(SETTINGS_PATH, "w") as f:
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+
+
+EXOTEL_FIELDS = ["api_key", "api_token", "account_sid", "exophone", "flow_id"]
+
+
+def _get_exotel_settings():
+    if not SETTINGS_PATH.exists():
+        return {}
+    with open(SETTINGS_PATH) as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("exotel", {})
+
+
+def _set_exotel_settings(values):
+    with open(SETTINGS_PATH) as f:
+        data = yaml.safe_load(f) or {}
+    data.setdefault("exotel", {}).update(values)
+    with open(SETTINGS_PATH, "w") as f:
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+
+
+TARGET_OPTIONS = [
+    ("employee_id", "Corporates — employee ID solutions"),
+    ("software", "Corporates — software (website, app development)"),
+    ("education", "Schools and Universities"),
+    ("suppliers", "Suppliers"),
+    ("healthcare", "Healthcare"),
+    ("manufacturing", "Manufacturing"),
+]
+
+
+@app.route("/target-audience")
+def target_audience():
+    return render_template("target_audience.html", options=TARGET_OPTIONS)
+
+
+@app.route("/target-audience/save", methods=["POST"])
+def save_target_audience():
+    # UI only for now — not wired to an actual campaign switch yet.
+    choice = request.form.get("target")
+    label = dict(TARGET_OPTIONS).get(choice, choice)
+    flash(f"Selected: {label}. Not wired to a real campaign switch yet.")
+    return redirect(url_for("target_audience"))
+
+
+@app.route("/guidelines")
+def guidelines():
+    return render_template(
+        "guidelines.html",
+        system_prompt=SYSTEM_PROMPT,
+        opening_message=OPENING_MESSAGE,
+        employee_id_prompt=EMPLOYEE_ID_PROMPT,
+    )
+
+
+@app.route("/call-api")
+def call_api():
+    return render_template("call_api.html", settings=_get_exotel_settings())
+
+
+@app.route("/call-api/save", methods=["POST"])
+def save_call_api():
+    values = {field: request.form.get(field, "").strip() for field in EXOTEL_FIELDS}
+    _set_exotel_settings(values)
+    flash("Exotel settings saved.")
+    return redirect(url_for("call_api"))
+
+
+@app.route("/set-voice")
+def set_voice():
+    return render_template(
+        "set_voice.html",
+        voices=_get_available_voices(),
+        current=_get_current_voice(),
+    )
+
+
+@app.route("/set-voice/save", methods=["POST"])
+def save_voice():
+    new_voice = request.form.get("voice")
+    if not new_voice:
+        flash("No voice selected.")
+        return redirect(url_for("set_voice"))
+
+    _set_voice(new_voice)
+    flash(
+        f"Voice set to {new_voice}. This takes effect on the next reload — "
+        f"use \"Stop Gemma\" then Start, or restart the app."
+    )
+    return redirect(url_for("set_voice"))
+
+
+@app.route("/dataset")
+def dataset():
+    """
+    Simple tabular view of the parsed call data (name, organization,
+    callback time), grouped by outcome — scheduled, rejected, or
+    incomplete.
+    """
+    return render_template("dataset.html", buckets=_get_calls_by_status())
+
+
+@app.route("/delete-call/<int:call_id>", methods=["POST"])
+def delete_call_route(call_id):
+    """Single-call delete — used by every per-row Delete button on Dataset."""
+    _delete_call(call_id)
+    flash("Call deleted.")
+    return redirect(url_for("dataset"))
+
+
+@app.route("/dataset/delete-selected", methods=["POST"])
+def delete_selected():
+    """
+    Bulk delete — shared by all three Dataset buckets, since the action
+    itself (delete whatever IDs were checked) doesn't actually depend on
+    which bucket they came from. Each bucket's form has its own
+    confirm() warning text, which is the only real difference between
+    them.
+    """
+    ids = request.form.getlist("call_ids")
+    for call_id in ids:
+        _delete_call(int(call_id))
+    flash(f"Deleted {len(ids)} call(s).")
+    return redirect(url_for("dataset"))
 
 
 @app.route("/page/<name>")
@@ -234,11 +521,8 @@ def placeholder(name):
     rather than 404ing.
     """
     titles = {
-        "review-conversations": "Review Conversations",
-        "dataset": "Dataset",
         "set-voice": "Set Voice",
         "guidelines": "Guidelines",
-        "history": "History",
         "message-api": "Message API",
         "call-api": "Call API",
     }

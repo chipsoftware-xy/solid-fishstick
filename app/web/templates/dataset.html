@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+
+{% block title %}Dataset — SparkSCT{% endblock %}
+
+{% block content %}
+<main class="dataset">
+    <p class="placeholder__eyebrow">SparkSCT</p>
+    <h1 class="review__title">Dataset</h1>
+
+    {% for label, key, warning in [
+        ('Scheduled', 'scheduled', 'Delete the selected scheduled call(s)? This is your most valuable data — this cannot be undone.'),
+        ('Rejected', 'rejected', 'Delete the selected call(s)? This cannot be undone.'),
+        ('Incomplete', 'incomplete', 'Delete the selected call(s)? This cannot be undone.')
+    ] %}
+        <section class="dataset__section">
+            <form id="bulk-delete-{{ key }}" method="post" action="{{ url_for('delete_selected') }}"
+                  onsubmit="return confirm('{{ warning }}');">
+            </form>
+
+            <h2 class="dataset__section-title">
+                <button type="submit" form="bulk-delete-{{ key }}" class="dataset__bulk-btn">
+                    Delete Selected
+                </button>
+                {{ label }} ({{ buckets[key]|length }})
+            </h2>
+
+            {% if key == 'incomplete' %}
+                <p class="dataset__note">
+                    Re-enter these numbers in your next run if they're still relevant.
+                </p>
+            {% endif %}
+
+            {% if buckets[key] %}
+                <table class="dataset__table">
+                    <thead>
+                        <tr>
+                            <th></th>
+
+                            <th>
+                                {% if key in ['rejected', 'incomplete'] %}
+                                    <input
+                                        type="checkbox"
+                                        class="dataset__select-all"
+                                        data-section="{{ key }}"
+                                        title="Select all"
+                                    >
+                                {% endif %}
+                            </th>
+
+                            <th>Name</th>
+                            <th>Organization</th>
+                            <th>Callback Time</th>
+                        </tr>
+                    </thead>
+
+                    <tbody>
+                        {% for call in buckets[key] %}
+                            <tr>
+                                <td>
+                                    <form method="post"
+                                          action="{{ url_for('delete_call_route', call_id=call.id) }}"
+                                          onsubmit="return confirm('Delete this call?');">
+                                        <button type="submit" class="dataset__row-delete">
+                                            Delete
+                                        </button>
+                                    </form>
+                                </td>
+
+                                <td>
+                                    <input
+                                        type="checkbox"
+                                        name="call_ids"
+                                        value="{{ call.id }}"
+                                        form="bulk-delete-{{ key }}"
+                                        class="dataset__call-checkbox-{{ key }}"
+                                    >
+                                </td>
+
+                                <td>{{ call.name or '—' }}</td>
+                                <td>{{ call.company or '—' }}</td>
+                                <td>{{ call.callback_time or '—' }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% else %}
+                <p class="placeholder__body">
+                    No calls in this category yet.
+                </p>
+            {% endif %}
+        </section>
+    {% endfor %}
+
+    <a href="{{ url_for('index') }}" class="placeholder__back">&larr; Back</a>
+</main>
+
+<script>
+    document.querySelectorAll('.dataset__select-all').forEach(selectAll => {
+        selectAll.addEventListener('change', function () {
+            const section = this.dataset.section;
+
+            const checkboxes = document.querySelectorAll(
+                `.dataset__call-checkbox-${section}`
+            );
+
+            checkboxes.forEach(checkbox => {
+                checkbox.checked = this.checked;
+            });
+        });
+    });
+</script>
+
+{% endblock %}

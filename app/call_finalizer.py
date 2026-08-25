@@ -14,6 +14,7 @@ import json
 from app.parser import parse_transcript
 from app.call_storage import init_db, save_call
 from app.conversation.stages import ConversationStage
+from app.llm.chat_session import _looks_like_time
 
 
 def _resolve_status(chat_session) -> str:
@@ -56,7 +57,18 @@ def finalize_call(chat_session, phone=None):
 
     parsed = parse_transcript(chat_session._transcript_path)
 
+    # Don't let a time the app's own validation rejected sneak back in
+    # through the transcript fallback — if chat_session never
+    # successfully captured a callback_time (status will reflect that),
+    # the parser's raw guess from the transcript hasn't been validated
+    # at all, and could be exactly the garbage _looks_like_time() was
+    # built to catch in the first place.
+    parsed_callback_time = parsed.get("callback_time")
+    if parsed_callback_time and not _looks_like_time(parsed_callback_time):
+        parsed_callback_time = None
+
     record = {
+        "call_id": chat_session.call_id,
         "phone": phone,
         # Prefer chat_session's live-tracked values — they reflect any
         # mid-call correction ("actually it's Alex, not Ali"), which a
@@ -69,7 +81,7 @@ def finalize_call(chat_session, phone=None):
         "quantity": parsed.get("quantity"),
         "brands": json.dumps(parsed.get("brands") or [], ensure_ascii=False),
         "location": json.dumps(parsed.get("location") or [], ensure_ascii=False),
-        "callback_time": chat_session.customer_callback_time or parsed.get("callback_time"),
+        "callback_time": chat_session.customer_callback_time or parsed_callback_time,
         "status": _resolve_status(chat_session),
         "transcript": json.dumps(chat_session.transcript, ensure_ascii=False),
     }

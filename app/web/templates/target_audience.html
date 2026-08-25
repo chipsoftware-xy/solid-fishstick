@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}Target Audience — SparkSCT{% endblock %}
+
+{% block content %}
+<main class="review">
+    <p class="placeholder__eyebrow">SparkSCT</p>
+    <h1 class="review__title">What do you plan to target?</h1>
+    <p class="placeholder__body">Select a vertical for Spark's next campaign.</p>
+
+    <form method="post" action="{{ url_for('save_target_audience') }}" class="target__form">
+        {% for value, label in options %}
+            <label class="target__option">
+                <input type="radio" name="target" value="{{ value }}">
+                {{ label }}
+            </label>
+        {% endfor %}
+        <label class="target__option">
+            <input type="radio" name="target" value="other">
+            Other &mdash; <input type="text" name="target_other" class="target__other-input" placeholder="specify">
+        </label>
+
+        <button type="submit" class="btn-outline target__save">Save</button>
+    </form>
+
+    <a href="{{ url_for('index') }}" class="placeholder__back">&larr; Back</a>
+</main>
+{% endblock %}

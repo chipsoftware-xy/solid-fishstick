@@ -62,7 +62,6 @@ def _prepare_text(text: str) -> str:
     # This specific voice model consistently mispronounces "great" —
     # swap it for a synonym rather than fight the model's training data.
     text = _replace_preserving_case(r"\bgreat\b", "wonderful", text)
-    text = text.replace("AI", "A I")
     return text
 
 
@@ -115,3 +114,22 @@ class TTS:
         end = time.perf_counter()
 
         return end - start
+
+    def synthesize_to_pcm(self, text: str):
+        """
+        Same synthesis as speak(), but returns raw PCM16 bytes and the
+        voice's native sample rate directly, instead of writing a WAV
+        file — for streamed call audio, which needs to be resampled to
+        Exotel's rate and chunked for sending over a WebSocket rather
+        than played locally.
+        """
+        text = clean_for_tts(text)
+        text = _prepare_text(text)
+
+        chunks = list(self.voice.synthesize(text))
+        if not chunks:
+            raise RuntimeError("No audio generated.")
+
+        pcm_bytes = b"".join(chunk.audio_int16_bytes for chunk in chunks)
+        sample_rate = chunks[0].sample_rate
+        return pcm_bytes, sample_rate
