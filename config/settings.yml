@@ -6,15 +6,12 @@ llm:
   num_ctx: 3072
   keep_alive: -1
   stall_threshold_seconds: 4.0
-  stall_phrase: "Just a moment, let me check that for you."
-
+  stall_phrase: Just a moment, let me check that for you.
 stt:
   model: base
   low_confidence_threshold: -1.2
-
 tts:
   voice: en_IN-dataset3Dljspeech-epochs%3D1089
-
 audio:
   sample_rate: 16000
   target_peak: 26000
@@ -27,3 +24,9 @@ audio:
   vad_min_speech_ms: 300
   vad_min_rms: 150
   vad_max_utterance_ms: 20000
+exotel:
+  api_key: 530324ea81a41cd2dcb36fc3c57935d123f2b6af961df3ed
+  api_token: e03cc8222d016e51e64f0d0b36f7841f513ed8e082e0ba9c
+  account_sid: infosware2
+  exophone: 01141185491
+  flow_id: '1327161'

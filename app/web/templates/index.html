@@ -10,23 +10,18 @@
     <section class="landing__action">
         <p class="landing__prompt">
             {% if call_in_progress %}
-                A call is currently in progress.
+                A local test call is currently in progress.
+            {% elif batch_active %}
+                Calling through the queue.
             {% else %}
-                Click the button below to start making calls.
+                Click below to start calling numbers in your queue.
             {% endif %}
         </p>
 
-        <form method="post" action="{{ url_for('start_call') }}"
-              class="{{ 'hidden' if call_in_progress else '' }}">
-            <button type="submit" class="btn-outline">Start</button>
+        <form method="post" action="{{ url_for('start_calling_queue') }}"
+              class="{{ 'hidden' if (batch_active or call_in_progress) else '' }}">
+            <button type="submit" class="btn-outline">Start Calling Queue</button>
         </form>
-
-        <form method="post" action="{{ url_for('stop_call') }}"
-              class="{{ '' if call_in_progress else 'hidden' }}">
-            <button type="submit" class="btn-outline btn-outline--stop">Stop</button>
-        </form>
-
-        <p class="refresh-hint">Refresh the page to see the latest call status.</p>
 
         <div class="live-transcript">
             <p class="last-call__label">Live Transcript</p>
@@ -50,6 +45,21 @@
                 <p class="last-call__line">No call yet.</p>
             {% endif %}
         </div>
+
+        <p class="placeholder__body">&nbsp;</p>
+
+        <form method="post" action="{{ url_for('start_call') }}"
+              class="{{ 'hidden' if (call_in_progress or batch_active) else '' }}">
+            <button type="submit" class="btn-outline">Start local testing</button>
+        </form>
+        <p class="placeholder__body">This is for local device testing only — no calls will be placed.</p>
+
+        <form method="post" action="{{ url_for('stop_call') }}"
+              class="{{ '' if (call_in_progress or batch_active) else 'hidden' }}">
+            <button type="submit" class="btn-outline btn-outline--stop">Stop</button>
+        </form>
+
+        <p class="refresh-hint">Refresh the page to see the latest call status.</p>
     </section>
 
     <footer class="landing__nav">

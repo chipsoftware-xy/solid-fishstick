@@ -55,6 +55,30 @@
     </section>
 
     <section class="dataset__section">
+        <h2 class="dataset__section-title">Failed ({{ failed|length }})</h2>
+        {% if failed %}
+            <table class="dataset__table">
+                <thead><tr><th>Phone</th><th>Uploaded</th><th></th></tr></thead>
+                <tbody>
+                    {% for entry in failed %}
+                        <tr>
+                            <td>{{ entry.phone }}</td>
+                            <td>{{ entry.uploaded_at }}</td>
+                            <td>
+                                <form method="post" action="{{ url_for('retry_call', queue_id=entry.id) }}">
+                                    <button type="submit" class="btn-outline">Retry</button>
+                                </form>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p class="placeholder__body">No failed calls.</p>
+        {% endif %}
+    </section>
+
+    <section class="dataset__section">
         <h2 class="dataset__section-title">Done ({{ done|length }})</h2>
         {% if done %}
             <table class="dataset__table">

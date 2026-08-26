@@ -540,6 +540,21 @@ body {
     border-color: var(--fg);
 }
 
+.home-link {
+    display: inline-block;
+    margin: 24px 0 0 40px;
+    color: var(--fg-muted);
+    text-decoration: none;
+    font-size: 0.9rem;
+    border-bottom: 1px solid var(--fg-faint);
+    padding-bottom: 2px;
+}
+
+.home-link:hover {
+    color: var(--fg);
+    border-color: var(--fg);
+}
+
 /* ---------- Responsive ---------- */
 
 @media (max-width: 720px) {

@@ -13,8 +13,21 @@ import datetime
 import threading
 from pathlib import Path
 
+import random
+
 _STALL_THRESHOLD_SECONDS = settings["llm"]["stall_threshold_seconds"]
-_STALL_PHRASE = settings["llm"]["stall_phrase"]
+# Several variations instead of always the same phrase — direct
+# feedback that hearing "Just a moment, let me check that for you"
+# every single time a reply is slow felt repetitive. Keeps the
+# originally-configured phrase as one of the options rather than
+# discarding it.
+_STALL_PHRASES = [
+    settings["llm"]["stall_phrase"],
+    "One moment please.",
+    "Let me think about that for a second.",
+    "Give me just a moment.",
+    "Okay, let me see.",
+]
 
 TRANSCRIPT_DIR = Path("transcripts")
 TRANSCRIPT_DIR.mkdir(exist_ok=True)
@@ -139,6 +152,21 @@ GENERIC_CONTINUATIONS = {
     "sure thing",
 }
 
+# Bare greetings/acknowledgments with no actual content — real testing
+# showed these were being sent through the FULL pipeline (knowledge
+# search + ~1500-token prompt + Gemma generation, 5-7+ seconds) for
+# input that needs none of that, which was also why the stall-filler
+# kept firing constantly: these trivial turns were among the slowest
+# simply by being routed through the expensive path unnecessarily.
+# Exact-match only (not _contains_phrase) — these need to be the WHOLE
+# message, since "hello" appearing partway through a longer sentence
+# ("hello, what is this about?") is a real question, not bare filler.
+GREETING_PHRASES = {"hello", "hi", "hey", "hello there", "hi there", "hey there"}
+GRATITUDE_PHRASES = {
+    "thank you", "thanks", "thank you very much", "thanks a lot",
+    "okay thank you", "ok thank you",
+}
+
 # Strip punctuation before matching so "No." / "Sure!" still hit the fast
 # paths instead of falling through to a full (slow) LLM call.
 _PUNCT_RE = re.compile(r"[^\w\s]")
@@ -191,9 +219,20 @@ _REPEAT_REQUEST_PHRASES = {
 _REPEAT_REQUEST_EXACT = {"what", "huh", "pardon", "sorry what", "im sorry what"}
 
 
+# A genuine "what did you say?" request is itself short. A long,
+# substantive message that happens to CONTAIN that phrase as one small
+# part of a bigger question ("...and what did you say about the
+# on-site service? How does that work?") is not a repeat request at
+# all — it got wrongly caught before because _contains_phrase doesn't
+# care how much OTHER content surrounds the match.
+_REPEAT_REQUEST_MAX_WORDS = 8
+
+
 def _requests_repeat(clean: str) -> bool:
     if clean in _REPEAT_REQUEST_EXACT:
         return True
+    if len(clean.split()) > _REPEAT_REQUEST_MAX_WORDS:
+        return False
     return _contains_phrase(clean, _REPEAT_REQUEST_PHRASES)
 
 
@@ -251,7 +290,7 @@ def _extract_and_strip_name(text: str):
 # would silently fail to strip anything in that case, since the pattern
 # never actually appears at position zero.
 _NAME_PREFIX_RE = re.compile(
-    r"\b(?:my name is|the name is|i am|i'm|this is|it'?s|call me)\s+",
+    r"\b(?:my name is|the name is|i am|i'm|this is|it'?s|call me)\s*",
     re.IGNORECASE,
 )
 
@@ -277,8 +316,14 @@ def _extract_name_answer(text: str) -> str:
     match = _NAME_PREFIX_RE.search(clause)
     if match:
         stripped = clause[match.end():].rstrip(".,!?").strip()
-    else:
-        stripped = clause.rstrip(".,!?").strip()
+        # If the prefix was found but NOTHING follows it (customer
+        # trailed off mid-sentence — "my name is..."), that's genuinely
+        # no answer. Falling back to the whole clause here was the
+        # actual bug: it still includes the prefix words themselves
+        # ("my name is"), which aren't filler words, so they survived
+        # cleaning and got returned as if they WERE the name.
+        return _clean_spoken_text(stripped) if stripped else ""
+    stripped = clause.rstrip(".,!?").strip()
     cleaned = _clean_spoken_text(stripped) if stripped else _clean_spoken_text(clause)
     return cleaned or text.strip()
 
@@ -288,7 +333,8 @@ def _extract_name_answer(text: str) -> str:
 # to the start, for the same reason as the name prefix above.
 _ORG_PREFIX_RE = re.compile(
     r"\b(?:i'?m(?:\s+calling)?\s+from|we'?re(?:\s+calling)?\s+from|"
-    r"calling from|i work for|i'?m with|we'?re with|with|it'?s|this is|from)\s+",
+    r"calling from|i work for|i'?m with|we'?re with|with|it'?s|this is|"
+    r"my organization is|my company is|from)\s*",
     re.IGNORECASE,
 )
 
@@ -306,8 +352,10 @@ def _extract_org_answer(text: str) -> str:
     match = _ORG_PREFIX_RE.search(clause)
     if match:
         stripped = clause[match.end():].rstrip(".,!?").strip()
-        cleaned = _clean_spoken_text(stripped) if stripped else _clean_spoken_text(clause)
-        return cleaned or text.strip()
+        # Same fix as the name version above — a recognized prefix
+        # with nothing after it ("my organization is...") is genuinely
+        # no answer, not a signal to fall back to the whole clause.
+        return _clean_spoken_text(stripped) if stripped else ""
 
     # No prefix matched — look for "from X" anywhere in the clause.
     from_match = _FROM_ANYWHERE_RE.search(clause)
@@ -465,14 +513,41 @@ _NOT_A_NAME = {
     "also", "here", "there", "done", "afraid", "worried", "interested",
     "available", "free", "well",
     "bye", "goodbye", "thanks", "thank you",
+    # Time/scheduling words — real bug: "you can call me next week..."
+    # got mis-extracted down to just "next", which passed validation
+    # since it wasn't on this list at all.
+    "next", "then", "now", "today", "tomorrow", "later", "soon",
+    "week", "month", "morning", "afternoon", "evening",
+    # Common short function words (articles, prepositions, basic verbs)
+    # — real bug: "no, it's an MV scene" got the correction regex to
+    # grab "an" as if it were the corrected name, since "an" wasn't on
+    # any blocklist. These are exactly the kind of word that ends up
+    # sitting right after "it's"/"I'm" in a sentence that isn't
+    # actually about a name at all.
+    "an", "a", "the", "and", "or", "but", "to", "of", "in", "on",
+    "at", "is", "was", "for", "with", "my", "your",
 }
+
+# A genuine name is a word or two, occasionally three (first + middle
+# + last). Tightened from 4 after "I want my name" (a real mis-
+# extraction) came in at exactly 4 words and slipped past the old cap.
+_NAME_MAX_WORDS = 3
 
 
 def _looks_like_name(text: str) -> bool:
     words = text.strip().split()
     if not words:
         return False
-    if len(words) == 1 and words[0].strip(".,!?").lower() in _NOT_A_NAME:
+    if len(words) == 1:
+        word = words[0].strip(".,!?").lower()
+        if word in _NOT_A_NAME:
+            return False
+        # Very few genuine names are 1-2 characters — this is a blunter
+        # backstop against short function words not already on the
+        # blocklist above, not a claim that short names don't exist.
+        if len(word) < 3:
+            return False
+    if len(words) > _NAME_MAX_WORDS:
         return False
     return True
 
@@ -508,13 +583,39 @@ _QUESTION_STARTERS = (
     "can you", "do you", "are you", "is it", "could you", "will you",
 )
 
+# "Hello?" is an extremely common, completely normal thing to say on a
+# phone call — checking the line's still connected, not a substantive
+# question — but it ends with "?", which the blanket rule below would
+# otherwise misclassify as "the customer asked me something, defer to
+# it." That misfire was cascading through several retry-capped states
+# in rapid succession on real calls (name confirmation -> organization
+# -> callback time, all within a few "Hello?"s), which looked like
+# random chaos but was actually just this one rule firing repeatedly.
+_NOT_ACTUALLY_A_QUESTION = {"hello", "hi", "hey", "hello there", "hey there"}
+
 
 def _looks_like_a_question(raw_text: str) -> bool:
     stripped = raw_text.strip()
+    lowered = stripped.lower().rstrip("?").strip()
+    if lowered in _NOT_ACTUALLY_A_QUESTION:
+        return False
     if stripped.endswith("?"):
         return True
-    lowered = stripped.lower()
     return any(lowered.startswith(starter) for starter in _QUESTION_STARTERS)
+
+
+def _has_unaddressed_caveat(raw_text: str) -> bool:
+    """
+    Catches "yes sure but I also need to know X" style replies — a
+    clean affirmative combined with a caveat introduced by "but", which
+    _looks_like_a_question alone doesn't catch when the caveat isn't
+    phrased as a question ("...but also I need to know where you're
+    based and can you deliver to Kashmir" doesn't start with a question
+    word or end in "?", even though it clearly has more to address).
+    Without this, the "but" and whatever follows it silently gets
+    dropped, treating the whole reply as an unconditional yes.
+    """
+    return bool(re.search(r"\bbut\b", raw_text, re.IGNORECASE))
 
 
 # Catches the customer asking to have details/company info sent to them
@@ -543,7 +644,7 @@ def _asks_to_send_details(raw_text: str) -> bool:
 # _try_fast_path), so this never fires during the initial collection
 # question, which is handled separately by _extract_name_answer.
 _NAME_CORRECTION_RE = re.compile(
-    r"\b(?:my name is|call me|it'?s|i'?m)\s+([a-zA-Z]+)",
+    r"\b(?:my name is|it'?s|i'?m)\s+([a-zA-Z]+)",
     re.IGNORECASE,
 )
 _ORG_CORRECTION_RE = re.compile(
@@ -768,6 +869,23 @@ class ChatSession:
         self.call_started = True
         return self._reply(OPENING_MESSAGE)
 
+    def respond_low_confidence(self):
+        """
+        Canned "I didn't quite catch that" reply for a transcription
+        Whisper itself wasn't confident about (low avg_logprob) — meant
+        to be called from the telephony layer BEFORE the text ever
+        reaches send_streaming/the LLM, so a likely-garbled
+        transcription doesn't get confidently acted on as if it were
+        accurate. Real testing data: confirmed hallucinations/gibberish
+        clustered at avg_logprob -1.25 to -3.27, while genuine (even
+        imperfect) transcriptions stayed between -0.29 and -0.87 — a
+        real, data-backed gap, not a guessed threshold. Goes through
+        _reply() like every other deterministic reply, so it's
+        correctly logged and becomes last_reply — a subsequent "what
+        did you say?" repeats THIS, not whatever came before it.
+        """
+        return self._reply("Sorry, I didn't quite catch that — could you say that again?")
+
     def save_summary(self, extra=None):
         """
         Write a single consolidated JSON for this call. Call this when
@@ -816,15 +934,6 @@ class ChatSession:
             self.call_started = True
             return self._reply(OPENING_MESSAGE)
 
-        # NOTE: this used to also appear a second time, right after the
-        # three correction blocks below (name/org/time). It's a FIX,
-        # not a feature — having it twice meant the first copy always
-        # won, so the "run auto-end AFTER corrections get first
-        # priority" ordering the second copy's comment describes was
-        # never actually in effect. Deleting the duplicate and keeping
-        # only the copy below the correction blocks is what actually
-        # gives corrections priority, matching the comment's intent.
-
         # "What did you say?" / "I can't hear you" / connection-glitch
         # style requests — repeat the last thing Spark actually said,
         # deterministically, no LLM call needed. Checked early since if
@@ -848,7 +957,6 @@ class ChatSession:
         # at that point, handled separately by _extract_name_answer).
         if self.customer_name and (
             "my name is" in clean
-            #or "call me" in clean
             or "actually" in clean
             or "correction" in clean
             or re.search(r"\bnot\b", clean)
@@ -856,6 +964,7 @@ class ChatSession:
             corrected = _detect_name_correction(user_message)
             if (
                 corrected
+                and len(corrected) >= 2
                 and _looks_like_name(corrected)
                 and corrected.lower() != self.customer_name.lower()
             ):
@@ -958,7 +1067,33 @@ class ChatSession:
                 "and profile to this number after the call."
             )
 
+        # Name confirmation ("Okay — Rahul, is that right?"). Checked
+        # BEFORE the general rejection check below — a bare "no" here
+        # means "that's not my name", not "I'm declining the whole
+        # call", but REJECTION_PHRASES contains "no", so without this
+        # ordering the general rejection check would catch it first and
+        # wrongly end the entire call.
         if self.waiting_for_name_confirmation:
+            # Repeating the name itself ("I am Gajendra", "Gajendra")
+            # is a completely natural way to confirm it — doesn't
+            # contain "yes"/"sure"/etc, so the phrase matching below
+            # would otherwise miss it and burn through the retry cap
+            # on a customer who was clearly, correctly confirming.
+            # Guarded against also containing a rejection signal — "No,
+            # that's not Gajendra, it's Rajesh" mentions the old name
+            # too, and must fall through to the correction handling
+            # below instead of being treated as confirming the name
+            # it's actually rejecting.
+            if (
+                self.customer_name
+                and self.customer_name.lower() in clean
+                and not _contains_phrase(clean, REJECTION_PHRASES)
+                and not _fuzzy_match_short_phrase(clean, REJECTION_PHRASES)
+            ):
+                self.waiting_for_name_confirmation = False
+                self.waiting_for_organization = True
+                return self._reply("And which organization are you calling from?")
+
             if _contains_phrase(clean, SPECIALIST_YES_PHRASES) or _fuzzy_match_short_phrase(
                 clean, SPECIALIST_YES_PHRASES
             ):
@@ -969,12 +1104,21 @@ class ChatSession:
             if _contains_phrase(clean, REJECTION_PHRASES) or _fuzzy_match_short_phrase(
                 clean, REJECTION_PHRASES
             ):
+                # Check for an embedded correction first ("No, it's
+                # Alex") so that's accepted in one turn instead of
+                # forcing them to repeat the name a second time.
+                # Minimum length guard: without it, "No, it's A" (STT
+                # mangling a longer word down to one letter) gets
+                # accepted as a one-letter "name".
                 corrected = _detect_name_correction(user_message)
                 if corrected and len(corrected) >= 2 and _looks_like_name(corrected):
-                    self.customer_name = corrected.title()
                     self.waiting_for_name_confirmation = False
+                    self.customer_name = corrected.title()
                     self.waiting_for_organization = True
-                    return self._reply(f"Got it {self.customer_name}. And which organization are you calling from?")
+                    return self._reply(
+                        f"Got it — {self.customer_name}. And which "
+                        f"organization are you calling from?"
+                    )
 
                 self.waiting_for_name_confirmation = False
                 self.customer_name = None
@@ -989,12 +1133,17 @@ class ChatSession:
                 self.waiting_for_name_confirmation = False
                 self.waiting_for_organization = True
                 return self._reply(
-                    "Let's continue — and which organization are you calling from?")
-            return self._reply(f"Sorry, just to confirm — is {self.customer_name} correct?")
+                    "Let's continue — and which organization are you "
+                    "calling from?"
+                )
+            return self._reply(
+                f"Sorry, just to confirm — is {self.customer_name} correct?"
+            )
 
         # Rejection
         if clean in REJECTION_PHRASES:
             self.controller.reject()
+            self.call_finished = True
             return self._reply("No problem at all. Thanks for your time. Have a great day.")
 
         # Busy
@@ -1016,18 +1165,19 @@ class ChatSession:
             # attempt costs a full ~15-20s LLM call for what should be
             # an instant response.
             #
-            # FIX: this previously read
-            #   `... or _fuzzy_match_short_phrase(...) and not _looks_like_a_question`
-            # — missing the call parens on `_looks_like_a_question`, so
-            # `not _looks_like_a_question` was `not <function object>`,
-            # which is always False. That silently killed the fuzzy-
-            # match fallback entirely (ANDed with an always-False value)
-            # and made the "not a question" guard a no-op. Now the
-            # question-guard actually applies to the whole match, and
-            # the fuzzy fallback works again.
-            if (_contains_phrase(clean, SPECIALIST_YES_PHRASES) or _fuzzy_match_short_phrase(
-                clean, SPECIALIST_YES_PHRASES
-            )) and not _looks_like_a_question(user_message):
+            # "and not _looks_like_a_question" guards against a message
+            # that BOTH contains an affirmation AND asks something new
+            # ("Yeah, sure, what does that include?") — without this,
+            # such a message was treated as a clean yes and the actual
+            # question got silently dropped. "and not
+            # _has_unaddressed_caveat" catches the same problem when
+            # the extra content is introduced by "but" instead of a
+            # question ("yeah sure but I also need to know where
+            # you're based").
+            if (
+                _contains_phrase(clean, SPECIALIST_YES_PHRASES)
+                or _fuzzy_match_short_phrase(clean, SPECIALIST_YES_PHRASES)
+            ) and not _looks_like_a_question(user_message) and not _has_unaddressed_caveat(user_message):
                 self.waiting_for_callback_confirmation = False
                 self.waiting_for_name = True
                 self.controller.start_scheduling()
@@ -1038,6 +1188,7 @@ class ChatSession:
             ):
                 self.waiting_for_callback_confirmation = False
                 self.controller.reject()
+                self.call_finished = True
                 return self._reply("No problem, thank you for your time!")
 
             if _looks_like_time(user_message):
@@ -1057,17 +1208,18 @@ class ChatSession:
                 self.controller.start_scheduling()
                 return self._reply("Great. May I get your name?")
 
-            # None of the above matched — the customer didn't answer
-            # yes/no/time, they've moved on to something else (a new
-            # question, a new topic). Clear the flag rather than
-            # leaving it stuck True indefinitely across future turns,
-            # which was silently accumulating specialist_offer_count
-            # every time the model happened to re-offer — treating a
-            # customer asking three different good questions in a row
-            # as if they'd ignored the same offer three times, and
-            # cutting off an actively engaged conversation. A
-            # sufficiently substantive reply resets the "count" of
-            # ignored offers, since it isn't one.
+            # None of the above matched — the customer didn't answer a
+            # clean yes/no/time, they've moved on to something else.
+            # Clear the flag rather than leaving it stuck True
+            # indefinitely across future turns. Reset the "ignored
+            # offer" count on ANY substantive reply (3+ words), not
+            # just ones phrased as a question — a customer giving real,
+            # specific information ("we already use DataCard printers")
+            # is clearly still engaged, not ignoring the offer, even
+            # though it's a statement rather than a question. Without
+            # this broader reset, a run of genuine, engaged statement-
+            # replies could silently trip the 3-offer cap and end an
+            # actively engaged conversation.
             self.waiting_for_callback_confirmation = False
             if len(clean.split()) >= 3:
                 self.specialist_offer_count = 0
@@ -1099,16 +1251,18 @@ class ChatSession:
             if not _looks_like_name(name_candidate):
                 self._name_retry_count += 1
                 if self._name_retry_count >= 2:
-                    # Give up gracefully rather than looping — proceed
-                    # with whatever we have rather than trapping the
-                    # customer. Skips confirmation here too, since
-                    # we're already accepting a low-confidence guess
-                    # just to move the call forward — asking "is that
-                    # right?" about a name we're not confident in
-                    # ourselves would likely just trigger another
-                    # unclear answer.
+                    # Give up gracefully rather than looping — but
+                    # "give up" means stop asking, not "accept whatever
+                    # we just determined ISN'T a valid name anyway".
+                    # Real bug found in testing: this used to store
+                    # name_candidate here regardless of the check just
+                    # above rejecting it, so confirmed gibberish (e.g.
+                    # "Inst், INC ID, INC ID...") ended up as the
+                    # customer's literal stored name. Leaving
+                    # customer_name unset is honest and already handled
+                    # gracefully by the closing message (name_part
+                    # becomes "" when customer_name is falsy).
                     self.waiting_for_name = False
-                    self.customer_name = name_candidate.title()
                     self.waiting_for_organization = True
                     return self._reply(
                         "No worries — and which organization are you "
@@ -1124,15 +1278,6 @@ class ChatSession:
             self.waiting_for_name_confirmation = True
             self._name_confirmation_retry_count = 0
             return self._reply(f"Okay — {self.customer_name}, is that right?")
-
-        # Confirming the name specifically — see the note in __init__
-        # for why this exists. Only the name gets re-asked on "no";
-        # organization hasn't been asked yet at this point, so there's
-        # nothing else to reset. Note: if the customer volunteers the
-        # correct name directly ("no, actually it's Alex") the EARLIER
-        # correction-detection block above already catches that in one
-        # turn, before this code ever runs — this block only handles a
-        # bare "no" with no correction offered in the same breath.
 
         if self.waiting_for_organization:
             if _looks_like_a_question(user_message):
@@ -1185,11 +1330,12 @@ class ChatSession:
                 self.customer_callback_time = callback_time
                 self.controller.set_callback_time(callback_time)
                 self.controller.close()
+                self.call_finished = True
                 name_part = f"{self.customer_name}, " if self.customer_name else ""
                 return self._reply(
                     f"Perfect, {name_part}our specialist will contact you "
-                    f"at {callback_time}. Thank you for your time, have a "
-                    f"great day!"
+                    f"at {callback_time} on this same number. Thank you "
+                    f"for your time, have a great day!"
                 )
 
             self.waiting_for_callback_time = True
@@ -1231,10 +1377,11 @@ class ChatSession:
                     self.waiting_for_callback_time = False
                     self.controller.set_callback_time(None)
                     self.controller.close()
+                    self.call_finished = True
                     return self._reply(
-                        "No problem — our specialist will reach out to "
-                        "find a time that works. Thank you for your "
-                        "time, have a great day!"
+                        "No problem — our specialist will reach out on "
+                        "this same number to find a time that works. "
+                        "Thank you for your time, have a great day!"
                     )
                 return self._reply(
                     "Sorry, I didn't catch a valid time — could you say "
@@ -1246,11 +1393,31 @@ class ChatSession:
             self.customer_callback_time = callback_time
             self.controller.set_callback_time(callback_time)
             self.controller.close()
+            self.call_finished = True
 
             name_part = f"{self.customer_name}, " if self.customer_name else ""
             return self._reply(
                 f"Perfect, {name_part}our specialist will contact you at "
-                f"{callback_time}. Thank you for your time, have a great day!"
+                f"{callback_time} on this same number. Thank you for your "
+                f"time, have a great day!"
+            )
+
+        # Bare "Hello"/"Thank you" with no other content — see
+        # GREETING_PHRASES/GRATITUDE_PHRASES above for why this exists.
+        # Deliberately placed here, AFTER every state-specific block
+        # (waiting_for_name, waiting_for_organization, etc.) rather than
+        # earlier — those already have their own retry logic for "that
+        # wasn't a valid answer," and a generic greeting reply would
+        # skip that retry logic without making any real progress on
+        # collecting the field being asked for. This only fires during
+        # the general conversational phase, matching where it actually
+        # showed up in testing.
+        if clean in GREETING_PHRASES:
+            return self._reply("Hi, yes — I'm here, please go ahead.")
+        if clean in GRATITUDE_PHRASES:
+            return self._reply(
+                "You're welcome — is there anything else I can help "
+                "with regarding our ID card solutions?"
             )
 
         return None
@@ -1377,7 +1544,7 @@ class ChatSession:
             reply += "."
         return f"{reply} {fallback_sentence}"
 
-    def _finalize_llm_reply(self, reply):
+    def _finalize_llm_reply(self, reply, on_sentence=None):
         if _offers_specialist(reply):
             self.specialist_offer_count += 1
             if self.specialist_offer_count >= 3:
@@ -1387,21 +1554,35 @@ class ChatSession:
                 # pretty set", "I'm good for now"). Stop re-pitching and
                 # close gracefully instead of asking a 4th time.
                 self.controller.reject()
+                self.call_finished = True
                 reply = (
                     "No problem at all — I'll leave you to it. Thanks "
                     "for your time, have a great day!"
                 )
+                if on_sentence:
+                    # In the streaming path, every sentence of the
+                    # ORIGINAL (uncapped) reply has already been spoken
+                    # via on_sentence by the time this runs — this
+                    # function only controls what gets LOGGED/returned.
+                    # Without explicitly speaking the override here too,
+                    # the customer hears the full real answer, then
+                    # nothing explains why the call ends on their very
+                    # next turn — it just looks like Spark abruptly
+                    # cutting them off.
+                    on_sentence(reply)
             else:
                 self.waiting_for_callback_confirmation = True
                 self.controller.specialist_requested()
         elif _sounds_like_closing(reply):
             # The model produced its own natural-sounding goodbye
             # without going through the deterministic scheduling/
-            # rejection paths — mark the call as actually ended anyway,
-            # so the customer's next reply (even a plain "you too,
-            # thanks") triggers the auto-end flow instead of Spark
-            # restarting the pitch from scratch.
+            # rejection paths. Ends the call right here — real testing
+            # showed waiting for one more customer turn before actually
+            # hanging up meant a hallucinated/garbled reply on that
+            # extra turn could get a full response instead of the call
+            # just ending, which felt broken from the customer's side.
             self.controller.close()
+            self.call_finished = True
 
         self.messages.append({"role": "assistant", "content": reply})
 
@@ -1484,8 +1665,9 @@ class ChatSession:
 
         def _stall_filler():
             if not first_sentence_ready.wait(timeout=_STALL_THRESHOLD_SECONDS):
-                self._log("assistant", _STALL_PHRASE)
-                on_sentence(_STALL_PHRASE)
+                phrase = random.choice(_STALL_PHRASES)
+                self._log("assistant", phrase)
+                on_sentence(phrase)
 
         stall_thread = threading.Thread(target=_stall_filler, daemon=True)
         stall_thread.start()
@@ -1509,7 +1691,7 @@ class ChatSession:
 
         reply = " ".join(full_sentences)
         reply = self._maybe_add_ribbon_fallback(reply, on_sentence=on_sentence)
-        result = self._finalize_llm_reply(reply)
+        result = self._finalize_llm_reply(reply, on_sentence=on_sentence)
 
         if DEBUG_TIMING:
             print(f"[TIMING] Total response: {time.perf_counter() - total_start:.2f}s")

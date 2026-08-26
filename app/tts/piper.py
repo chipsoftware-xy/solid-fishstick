@@ -50,6 +50,10 @@ def _replace_preserving_case(pattern: str, replacement: str, text: str) -> str:
 def _prepare_text(text: str) -> str:
     # Improve pronunciation for TTS without changing the actual transcript.
     text = text.replace("RFID", "R F I D")
+    # Same category as RFID — this voice model reads "AI" as a single
+    # slurred "ayi" sound instead of two distinct letters. Word-boundary
+    # matched so it doesn't touch "AI" appearing inside another word.
+    text = re.sub(r"\bAI\b", "A I", text)
     # Opposite problem from RFID: "PAN" here is a real word ("pan-India"
     # = across India), not an acronym — but Piper/espeak reads short
     # all-caps tokens as spelled-out letters by default ("P A N India").
@@ -60,8 +64,15 @@ def _prepare_text(text: str) -> str:
     # reads as the standalone word pushes it toward the right sound.
     text = re.sub(r"\bmifare\b", "My-fare", text, flags=re.IGNORECASE)
     # This specific voice model consistently mispronounces "great" —
-    # swap it for a synonym rather than fight the model's training data.
-    text = _replace_preserving_case(r"\bgreat\b", "wonderful", text)
+    # tried "wonderful" first, but that also came out wrong (likely the
+    # multi-syllable schwa+r combination). "good" is shorter and far
+    # more phonetically simple, lower risk of the same problem — but
+    # this is a best guess without being able to hear the actual
+    # output; may need further adjustment.
+    text = _replace_preserving_case(r"\bgreat\b", "good", text)
+    # Same category of issue reported for "okay" — replacing with
+    # "alright" as a first attempt for the same reason.
+    text = _replace_preserving_case(r"\bokay\b", "alright", text)
     return text
 
 

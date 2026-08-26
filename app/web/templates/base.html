@@ -19,6 +19,10 @@
         {% endif %}
     {% endwith %}
 
+    {% if request.endpoint != 'index' %}
+        <a href="{{ url_for('index') }}" class="home-link">&larr; Home</a>
+    {% endif %}
+
     {% block content %}{% endblock %}
 </body>
 </html>

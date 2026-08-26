@@ -11,7 +11,69 @@ request that makes the phone actually ring; the telephony server just
 needs to already be running and reachable at whatever URL that applet
 points to.
 """
+import re
+import yaml
+from pathlib import Path
+
 import requests
+
+SETTINGS_PATH = Path("config/settings.yml")
+EXOTEL_FIELDS = ["api_key", "api_token", "account_sid", "exophone", "flow_id"]
+
+
+def normalize_phone(val):
+    """
+    Normalizes a phone number into the +91XXXXXXXXXX format (E.164) —
+    strips pandas' trailing '.0' on number-formatted cells, strips a
+    leading 0 (common domestic-style habit), and adds the +91 prefix.
+    Shared by both the Call Queue upload (server.py) and the telephony
+    server (two_way_test.py) — Exotel reports the caller's number in
+    plain domestic format in its 'start' event (e.g. '09650707992'),
+    while Call Queue stores E.164 ('+919650707992'). Without both
+    sides going through this same normalization, marking a call done/
+    failed by phone number silently never matches anything — confirmed
+    real bug, present in every test throughout this whole telephony
+    phase.
+    """
+    s = str(val).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+
+    # Strip anything that isn't a digit or a leading +, in case a
+    # space or dash snuck in.
+    s = re.sub(r"[^\d+]", "", s)
+
+    if s.startswith("+"):
+        return s  # already fully formatted — leave it alone
+
+    if s.startswith("91") and len(s) == 12:
+        return "+" + s  # has the country code, just missing the +
+
+    if s.startswith("0"):
+        s = s[1:]  # strip a leading domestic-style 0
+
+    if len(s) == 10:
+        return "+91" + s
+
+    # Doesn't match a recognized shape — leave as-is rather than guess
+    # further.
+    return s
+
+
+def get_exotel_settings():
+    if not SETTINGS_PATH.exists():
+        return {}
+    with open(SETTINGS_PATH) as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("exotel", {})
+
+
+def set_exotel_settings(values):
+    with open(SETTINGS_PATH) as f:
+        data = yaml.safe_load(f) or {}
+    data.setdefault("exotel", {}).update(values)
+    with open(SETTINGS_PATH, "w") as f:
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
 
 
 class ExotelConfigError(Exception):

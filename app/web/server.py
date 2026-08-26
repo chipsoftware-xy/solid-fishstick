@@ -6,6 +6,7 @@ resources (Ollama, mic, DB), so this is meant to be reached only via
 """
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -18,8 +19,15 @@ from flask import Flask, render_template, redirect, url_for, flash, request
 
 from app.conversation.call_runner import run_call
 from app.conversation.voice_session import VoiceSession
-from app.call_storage import DB_PATH, delete_call as _delete_call, add_numbers_to_queue, get_queue, set_queue_status
-from telephony.dialer import place_call, ExotelConfigError
+from app.call_storage import DB_PATH, delete_call as _delete_call, add_numbers_to_queue, get_queue, set_queue_status, get_next_pending, mark_stale_calls_as_failed
+from telephony.dialer import (
+    place_call,
+    ExotelConfigError,
+    get_exotel_settings,
+    set_exotel_settings,
+    EXOTEL_FIELDS,
+    normalize_phone,
+)
 from app.llm.prompts import SYSTEM_PROMPT, OPENING_MESSAGE
 from app.llm.knowledge_prompts import EMPLOYEE_ID_PROMPT
 
@@ -45,6 +53,18 @@ _stop_event = threading.Event()
 # again — closer to how a real batch of calls will eventually behave,
 # where all of that only needs to load once per run, not once per call.
 _voice_session = None
+
+# Same three files two_way_test.py (the separate telephony process)
+# uses — this is the entire cross-process coordination mechanism for
+# batch dialing, no sockets/IPC needed for something this infrequent.
+BATCH_ACTIVE_PATH = Path("data/batch_active")
+BATCH_STOP_SIGNAL_PATH = Path("data/batch_stop_signal")
+ACTIVE_CALL_ID_PATH = Path("data/active_call_id.txt")
+
+# Generous buffer over one call (~5 min at most) plus the 2.5-min pause
+# between calls — long enough to never mistake a genuinely running
+# batch for a stuck one.
+BATCH_STALE_SECONDS = 600
 
 
 def _fetch_calls(status=None):
@@ -138,6 +158,7 @@ def index():
     return render_template(
         "index.html",
         call_in_progress=in_progress,
+        batch_active=BATCH_ACTIVE_PATH.exists(),
         latest_call=_get_latest_call(),
     )
 
@@ -164,14 +185,72 @@ def start_call():
 
 @app.route("/stop-call", methods=["POST"])
 def stop_call():
+    # A batch runs in the separate telephony process, so it's tracked
+    # via the shared file, not _call_in_progress — check both, since
+    # either (or neither) could be true depending on what's running.
+    batch_was_active = BATCH_ACTIVE_PATH.exists()
+    if batch_was_active:
+        BATCH_STOP_SIGNAL_PATH.parent.mkdir(exist_ok=True)
+        BATCH_STOP_SIGNAL_PATH.touch()
+
     with _call_lock:
         in_progress = _call_in_progress
-    if not in_progress:
+    if in_progress:
+        _stop_event.set()
+
+    if not in_progress and not batch_was_active:
         flash("No call is currently in progress.")
         return redirect(url_for("index"))
 
-    _stop_event.set()
-    flash("Stopping — the current exchange will finish, then the call will end.")
+    if batch_was_active:
+        flash("Stopping — the current call will finish, then no further numbers will be dialed.")
+    else:
+        flash("Stopping — the current exchange will finish, then the call will end.")
+    return redirect(url_for("index"))
+
+
+@app.route("/start-calling-queue", methods=["POST"])
+def start_calling_queue():
+    """
+    Dials the FIRST pending number in Call Queue. Everything after
+    that — pausing, dialing the next number, ending the batch — is
+    handled entirely by the telephony server (two_way_test.py), which
+    already knows the exact instant each call ends. This route's only
+    job is starting the chain.
+    """
+    if BATCH_ACTIVE_PATH.exists():
+        # If the flag is genuinely recent, a batch really is running —
+        # refuse to start a second one. But if it's old, the batch that
+        # set it never properly continued or cleared it (e.g. its very
+        # FIRST call never even connected, so two_way_test.py's finally
+        # block — the only place that normally clears this — never ran
+        # at all). Don't block forever on a flag nothing's coming back
+        # to clean up; same staleness-timeout idea as the queue-entry
+        # fix, applied to this file instead of a database row.
+        age_seconds = time.time() - BATCH_ACTIVE_PATH.stat().st_mtime
+        if age_seconds < BATCH_STALE_SECONDS:
+            flash("A batch is already running.")
+            return redirect(url_for("index"))
+        BATCH_ACTIVE_PATH.unlink()
+
+    next_entry = get_next_pending()
+    if not next_entry:
+        flash("No pending numbers in Call Queue.")
+        return redirect(url_for("index"))
+
+    try:
+        place_call(next_entry["phone"], get_exotel_settings())
+    except ExotelConfigError as e:
+        flash(str(e))
+        return redirect(url_for("index"))
+    except Exception as e:
+        flash(f"Call failed to place: {e}")
+        return redirect(url_for("index"))
+
+    BATCH_ACTIVE_PATH.parent.mkdir(exist_ok=True)
+    BATCH_ACTIVE_PATH.touch()
+    set_queue_status(next_entry["id"], "calling")
+    flash(f"Started calling queue — dialing {next_entry['phone']}.")
     return redirect(url_for("index"))
 
 
@@ -233,12 +312,25 @@ def shutdown_app():
 @app.route("/live-transcript")
 def live_transcript():
     """
-    Polled by the page while a call is running. Reads straight off the
-    live ChatSession's transcript list, which the background call-
-    thread is appending to turn by turn as the conversation happens —
-    no separate live-tracking needed, this is the same object the call
-    itself is using.
+    Polled by the page while a call is running. Checks for an active
+    PHONE call first — that ChatSession lives in the separate
+    telephony process, not this one, so it's tracked by tailing the
+    same transcripts/{id}.jsonl file chat_session.py already writes to
+    incrementally, using ACTIVE_CALL_ID_PATH to know which one. Falls
+    back to the original local-mic behavior (reading straight off the
+    live ChatSession object) unchanged if no phone call is active.
     """
+    if ACTIVE_CALL_ID_PATH.exists():
+        call_id = ACTIVE_CALL_ID_PATH.read_text().strip()
+        if call_id:
+            transcript_path = Path("transcripts") / f"{call_id}.jsonl"
+            if transcript_path.exists():
+                transcript = []
+                for line in transcript_path.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        transcript.append(json.loads(line))
+                return {"in_progress": True, "transcript": transcript}
+
     with _call_lock:
         in_progress = _call_in_progress
         transcript = (
@@ -279,25 +371,20 @@ def review_conversations():
     return render_template("review_conversations.html", calls=_get_recent_calls(limit=5))
 
 
-def _clean_phone_value(val):
-    """
-    Strips the trailing '.0' pandas adds when a phone number column is
-    number-formatted in Excel (919876543210 becomes 919876543210.0 on
-    read) — a common, easy-to-miss corruption if not handled explicitly.
-    """
-    s = str(val).strip()
-    if s.endswith(".0"):
-        s = s[:-2]
-    return s
-
-
 @app.route("/call-queue")
 def call_queue():
+    caught = mark_stale_calls_as_failed()
+    if caught:
+        flash(f"{caught} call(s) stuck on 'calling' for too long — marked as failed.")
+
     queue = get_queue()
     pending = [q for q in queue if q["status"] == "pending"]
     calling = [q for q in queue if q["status"] == "calling"]
+    failed = [q for q in queue if q["status"] == "failed"]
     done = [q for q in queue if q["status"] == "done"]
-    return render_template("call_queue.html", pending=pending, calling=calling, done=done)
+    return render_template(
+        "call_queue.html", pending=pending, calling=calling, failed=failed, done=done
+    )
 
 
 @app.route("/call-queue/upload", methods=["POST"])
@@ -324,7 +411,7 @@ def upload_call_queue():
         flash("Couldn't find a 'phone' or 'number' column in that file.")
         return redirect(url_for("call_queue"))
 
-    numbers = [_clean_phone_value(n) for n in df[col].dropna().tolist()]
+    numbers = [normalize_phone(n) for n in df[col].dropna().tolist()]
     numbers = [n for n in numbers if n]
 
     if not numbers:
@@ -344,7 +431,7 @@ def trigger_call(queue_id):
         return redirect(url_for("call_queue"))
 
     try:
-        place_call(phone, _get_exotel_settings())
+        place_call(phone, get_exotel_settings())
     except ExotelConfigError as e:
         flash(str(e))
         return redirect(url_for("call_queue"))
@@ -356,6 +443,17 @@ def trigger_call(queue_id):
 
     set_queue_status(queue_id, "calling")
     flash(f"Calling {phone}.")
+    return redirect(url_for("call_queue"))
+
+
+@app.route("/call-queue/retry/<int:queue_id>", methods=["POST"])
+def retry_call(queue_id):
+    """Moves a failed entry back to pending, so it shows up for a
+    manual Call click or the next batch run — doesn't auto-redial it
+    itself, same "explicit action, not silent auto-retry" pattern as
+    everything else retryable in this app."""
+    set_queue_status(queue_id, "pending")
+    flash("Moved back to pending — click Call, or it'll be picked up by the next batch run.")
     return redirect(url_for("call_queue"))
 
 
@@ -383,25 +481,6 @@ def _set_voice(new_voice):
     with open(SETTINGS_PATH) as f:
         data = yaml.safe_load(f) or {}
     data.setdefault("tts", {})["voice"] = new_voice
-    with open(SETTINGS_PATH, "w") as f:
-        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-
-
-EXOTEL_FIELDS = ["api_key", "api_token", "account_sid", "exophone", "flow_id"]
-
-
-def _get_exotel_settings():
-    if not SETTINGS_PATH.exists():
-        return {}
-    with open(SETTINGS_PATH) as f:
-        data = yaml.safe_load(f) or {}
-    return data.get("exotel", {})
-
-
-def _set_exotel_settings(values):
-    with open(SETTINGS_PATH) as f:
-        data = yaml.safe_load(f) or {}
-    data.setdefault("exotel", {}).update(values)
     with open(SETTINGS_PATH, "w") as f:
         yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
 
@@ -442,13 +521,13 @@ def guidelines():
 
 @app.route("/call-api")
 def call_api():
-    return render_template("call_api.html", settings=_get_exotel_settings())
+    return render_template("call_api.html", settings=get_exotel_settings())
 
 
 @app.route("/call-api/save", methods=["POST"])
 def save_call_api():
     values = {field: request.form.get(field, "").strip() for field in EXOTEL_FIELDS}
-    _set_exotel_settings(values)
+    set_exotel_settings(values)
     flash("Exotel settings saved.")
     return redirect(url_for("call_api"))
 
