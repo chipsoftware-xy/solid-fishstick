@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}Set Voice — SparkSCT{% endblock %}
+
+{% block content %}
+<main class="review">
+    <p class="placeholder__eyebrow">SparkSCT</p>
+    <h1 class="review__title">Set Voice</h1>
+    {% include "_non_functional_notice.html" %}
+
+    {% if voices %}
+        <p class="placeholder__body">Current voice: {{ current or 'not set' }}</p>
+
+        <form method="post" action="{{ url_for('save_voice') }}" class="queue__upload">
+            <select name="voice">
+                {% for voice in voices %}
+                    <option value="{{ voice }}" {% if voice == current %}selected{% endif %}>{{ voice }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="btn-outline">Save</button>
+        </form>
+    {% else %}
+        <p class="placeholder__body">No voice files found in models/piper/voices/.</p>
+    {% endif %}
+
+    <a href="{{ url_for('index') }}" class="placeholder__back">&larr; Back</a>
+</main>
+{% endblock %}

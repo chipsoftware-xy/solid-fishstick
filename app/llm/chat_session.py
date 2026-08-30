@@ -36,6 +36,18 @@ TRANSCRIPT_DIR.mkdir(exist_ok=True)
 # small but real per-turn cost (serializing the whole message list).
 DEBUG_TIMING = True
 
+# Separate from DEBUG_TIMING since this is much more verbose — dumps
+# the exact messages sent to Ollama on every turn, so two consecutive
+# turns can be diff'd by hand to find the exact point where the prompt
+# stops being identical. This is the actual test needed to determine
+# whether Ollama's cache CAN help here at all, rather than assuming it
+# either does or doesn't based on a synthetic benchmark that doesn't
+# match our real message structure (a fresh knowledge_block inserted
+# before the final user message every turn is a specific, concrete
+# suspect for breaking prefix-match caching, independent of whether
+# Ollama's own caching implementation works correctly).
+DEBUG_PROMPT_DUMP = True
+
 REJECTION_PHRASES = {
     "no",
     "nope",
@@ -618,6 +630,40 @@ def _has_unaddressed_caveat(raw_text: str) -> bool:
     return bool(re.search(r"\bbut\b", raw_text, re.IGNORECASE))
 
 
+# A genuine, clean "yes" is short — "Yes", "Yeah sure", "Okay, sounds
+# good". Real bug, recurring in multiple shapes despite several
+# targeted patches: _contains_phrase scans the ENTIRE message for a
+# yes-word appearing ANYWHERE, so a long, substantive statement that
+# merely opens with "Yeah, so..." was getting treated as an
+# unconditional yes, with everything after it silently discarded. The
+# question-guard and but-guard each caught one specific SHAPE of this
+# (a trailing question, a trailing "but" clause) but neither addresses
+# the actual root cause — length. No amount of "and also not X, and
+# also not Y" narrow exceptions can cover every way a long message can
+# start with an affirmation word while actually saying something
+# substantive. Gating on word count directly fixes the general case
+# instead of one more specific shape of it.
+_CLEAN_YES_MAX_WORDS = 6
+
+
+def _is_clean_affirmative(user_message: str, clean: str) -> bool:
+    """
+    The single, consolidated check for "did the customer cleanly say
+    yes" — used everywhere SPECIALIST_YES_PHRASES matching happens, so
+    this can't drift out of sync the way the two separate call sites
+    previously did (one had the question/caveat guards, one didn't).
+    """
+    if len(clean.split()) > _CLEAN_YES_MAX_WORDS:
+        return False
+    if _looks_like_a_question(user_message):
+        return False
+    if _has_unaddressed_caveat(user_message):
+        return False
+    return _contains_phrase(clean, SPECIALIST_YES_PHRASES) or bool(
+        _fuzzy_match_short_phrase(clean, SPECIALIST_YES_PHRASES)
+    )
+
+
 # Catches the customer asking to have details/company info sent to them
 # ("can you send me your details over this number", "text me the
 # profile", "whatsapp me a brochure") — a "send" verb and a "content"
@@ -1094,9 +1140,7 @@ class ChatSession:
                 self.waiting_for_organization = True
                 return self._reply("And which organization are you calling from?")
 
-            if _contains_phrase(clean, SPECIALIST_YES_PHRASES) or _fuzzy_match_short_phrase(
-                clean, SPECIALIST_YES_PHRASES
-            ):
+            if _is_clean_affirmative(user_message, clean):
                 self.waiting_for_name_confirmation = False
                 self.waiting_for_organization = True
                 return self._reply("And which organization are you calling from?")
@@ -1155,29 +1199,11 @@ class ChatSession:
         # Callback confirmation response
         if self.waiting_for_callback_confirmation:
 
-            # Contains-match first (catches natural phrasing like "yeah
-            # sure of course" that exact-match membership misses
-            # entirely, since it isn't equal to any single phrase in the
-            # set); fuzzy match as a second fallback specifically for
-            # garbled short STT output ("Yashur", "Yashore" for "yeah
-            # sure") that doesn't contain a clean matching phrase at
-            # all. Without either, each garbled/naturally-phrased
-            # attempt costs a full ~15-20s LLM call for what should be
-            # an instant response.
-            #
-            # "and not _looks_like_a_question" guards against a message
-            # that BOTH contains an affirmation AND asks something new
-            # ("Yeah, sure, what does that include?") — without this,
-            # such a message was treated as a clean yes and the actual
-            # question got silently dropped. "and not
-            # _has_unaddressed_caveat" catches the same problem when
-            # the extra content is introduced by "but" instead of a
-            # question ("yeah sure but I also need to know where
-            # you're based").
-            if (
-                _contains_phrase(clean, SPECIALIST_YES_PHRASES)
-                or _fuzzy_match_short_phrase(clean, SPECIALIST_YES_PHRASES)
-            ) and not _looks_like_a_question(user_message) and not _has_unaddressed_caveat(user_message):
+            # See _is_clean_affirmative's docstring for why this needs
+            # to be more than a simple phrase-contains check — length,
+            # question, and caveat guards all matter here, not just
+            # whether a yes-word appears anywhere in the message.
+            if _is_clean_affirmative(user_message, clean):
                 self.waiting_for_callback_confirmation = False
                 self.waiting_for_name = True
                 self.controller.start_scheduling()
@@ -1428,7 +1454,6 @@ class ChatSession:
     # LLM paths so this logic only exists once.
     # ------------------------------------------------------------------
     def _build_llm_messages(self, user_message, clean):
-        self.messages.append({"role": "user", "content": user_message})
         self.exchange_count += 1
 
         if clean in GENERIC_CONTINUATIONS:
@@ -1492,15 +1517,31 @@ class ChatSession:
             if knowledge_context else reminder
         )
 
+        # Both appended PERMANENTLY, in the exact order sent to the LLM
+        # — this is the actual fix for prefix-cache reuse. Previously
+        # the knowledge_block was inserted only into a temporary COPY
+        # (list(self.messages)) and never persisted into self.messages
+        # itself, meaning the STORED history's shape differed from what
+        # was actually sent on every single turn. Confirmed by diffing
+        # two consecutive real prompt dumps: the message sequence
+        # diverged immediately after the system prompt, every turn,
+        # regardless of Ollama's own caching behavior — no caching
+        # mechanism can help if the prefix itself never stays stable.
+        self.messages.append({"role": "system", "content": knowledge_block})
+        self.messages.append({"role": "user", "content": user_message})
+
         llm_messages = list(self.messages)
-        llm_messages.insert(-1, {
-            "role": "system",
-            "content": knowledge_block
-        })
 
         if DEBUG_TIMING:
             prompt_chars = sum(len(m["content"]) for m in llm_messages)
             print(f"[TIMING] Prompt size: {prompt_chars} characters")
+
+        if DEBUG_PROMPT_DUMP:
+            print(f"\n===== FULL PROMPT DUMP (turn, {len(llm_messages)} messages) =====")
+            for i, msg in enumerate(llm_messages):
+                print(f"--- MESSAGE {i} [{msg['role']}] ---")
+                print(repr(msg["content"]))
+            print("===== END PROMPT DUMP =====\n")
 
         return llm_messages
 
@@ -1586,7 +1627,23 @@ class ChatSession:
 
         self.messages.append({"role": "assistant", "content": reply})
 
-        if len(self.messages) > 5:
+        # Lowered back down from 60 — real, severe evidence this was
+        # the wrong tradeoff. A call that grew to 24 messages (~3050
+        # tokens) hit 35.84s of prompt-eval time on one turn — roughly
+        # 12-15x worse than the ~2-3s seen at half that size, not the
+        # ~2x linear scaling that would be expected. Exotel's own
+        # keepalive timeout killed the connection while the server sat
+        # blocked waiting on that one LLM call, ending the call before
+        # it ever reached name/org collection. The threshold was raised
+        # to 60 specifically to preserve prefix-cache reuse across a
+        # full call — but that benefit was never actually confirmed:
+        # a separate check of per-token prompt-eval rate on a "good"
+        # transcript stayed flat rather than dropping, which is not
+        # the signature of a working cache. Removing this safety net
+        # for an unconfirmed benefit was the wrong trade, and a bounded
+        # loss of older context is a far smaller cost than a call
+        # dying mid-conversation.
+        if len(self.messages) > 15:
             self.messages = [self.messages[0], *self.messages[-4:]]
 
         return self._reply(reply)

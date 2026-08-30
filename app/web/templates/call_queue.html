@@ -94,6 +94,13 @@
         {% endif %}
     </section>
 
-    <a href="{{ url_for('index') }}" class="placeholder__back">&larr; Back</a>
+    <div class="review__footer">
+        <a href="{{ url_for('index') }}" class="placeholder__back">&larr; Back</a>
+        <form method="post" action="{{ url_for('clear_all_queue') }}"
+              onsubmit="return confirm('This removes every number in Call Queue — pending, calling, failed, and done. This can\'t be undone. Continue?');"
+              class="review__footer-form">
+            <button type="submit" class="btn-link btn-link--stop">Clear All</button>
+        </form>
+    </div>
 </main>
 {% endblock %}

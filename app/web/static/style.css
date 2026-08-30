@@ -18,6 +18,8 @@ body {
     font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-weight: 300;
     min-height: 100vh;
+    display: flex;
+    flex-direction: column;
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -81,6 +83,26 @@ body {
     text-align: center;
 }
 
+.quick-dial {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.quick-dial__input {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    padding: 13px 16px;
+    font-family: inherit;
+    font-size: 0.95rem;
+    min-width: 260px;
+}
+
+.quick-dial__input::placeholder {
+    color: var(--fg-faint);
+}
+
 .btn-outline {
     font-family: inherit;
     background: transparent;
@@ -119,7 +141,45 @@ body {
     color: var(--bg);
     border-color: rgba(255, 120, 120, 0.85);
 }
+.btn-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+.btn-link--stop {
+    color: #b3261e; /* swap for whatever red your --stop modifier already uses */
+}
 
+.btn-link--stop:hover {
+    color: #7a1a15;
+}
+
+.btn-link.btn-link--stop {
+    /* Overrides the base .btn-link's native text-decoration: underline
+       (which sits flush against the text, zero gap) with the same
+       border-bottom + padding-bottom technique placeholder__back uses
+       — that padding is exactly the gap that was missing. currentColor
+       means the line automatically matches whatever color is active,
+       including the darker red on :hover, without a separate rule. */
+    text-decoration: none;
+    border-bottom: 1px solid currentColor;
+    padding-bottom: 2px;
+}
+
+
+.review__footer-form {
+    display: inline;
+}
+.review__footer {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1.5rem;
+}
 .hidden {
     display: none;
 }
@@ -553,6 +613,31 @@ body {
 .home-link:hover {
     color: var(--fg);
     border-color: var(--fg);
+}
+
+.app-footer {
+    text-align: center;
+    padding: 24px 20px;
+    margin-top: auto;
+}
+
+.app-footer p {
+    margin: 0;
+    color: var(--fg-faint);
+    font-size: 0.8rem;
+    font-weight: 300;
+}
+
+/* ---------- Not-functional-yet notice ---------- */
+
+.notfunctional {
+    background: rgba(255, 200, 80, 0.12);
+    border: 1px solid rgba(255, 200, 80, 0.35);
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-size: 0.9rem;
+    color: var(--fg-muted);
+    margin: 16px 0 24px;
 }
 
 /* ---------- Responsive ---------- */

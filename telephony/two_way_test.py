@@ -93,17 +93,30 @@ knowledge = KnowledgeBase()
 print("Shared resources ready.")
 
 
+SEND_TIMEOUT_SECONDS = 30
+
+
 async def send_pcm_as_media(ws, stream_sid, pcm_bytes):
     """Splits PCM audio into Exotel-sized chunks and sends each as its
-    own media event."""
-    for i in range(0, len(pcm_bytes), OUTGOING_CHUNK_BYTES):
-        chunk = pcm_bytes[i:i + OUTGOING_CHUNK_BYTES]
-        payload = base64.b64encode(chunk).decode()
-        await ws.send(json.dumps({
-            "event": "media",
-            "stream_sid": stream_sid,
-            "media": {"payload": payload},
-        }))
+    own media event. Wrapped in a short timeout, not because a genuine
+    conversation has any length limit, but because sending bytes over
+    an already-open connection should never legitimately take this
+    long — if it does, the connection is effectively dead even though
+    nothing has raised ConnectionClosed yet, which is a real observed
+    failure mode (a 6+ minute hang after a customer hung up), not a
+    theoretical one. This is a targeted timeout on the specific
+    operation that hung, not a limit on overall call duration."""
+    async def _send():
+        for i in range(0, len(pcm_bytes), OUTGOING_CHUNK_BYTES):
+            chunk = pcm_bytes[i:i + OUTGOING_CHUNK_BYTES]
+            payload = base64.b64encode(chunk).decode()
+            await ws.send(json.dumps({
+                "event": "media",
+                "stream_sid": stream_sid,
+                "media": {"payload": payload},
+            }))
+
+    await asyncio.wait_for(_send(), timeout=SEND_TIMEOUT_SECONDS)
 
 
 async def run_turn(ws, chat, stream_sid, user_message):
@@ -111,15 +124,24 @@ async def run_turn(ws, chat, stream_sid, user_message):
     Runs one full Spark turn: chat_session.send_streaming() in a
     background thread (it's synchronous), streaming each sentence's
     synthesized audio back over the WebSocket as it becomes ready
-    rather than waiting for the entire reply to finish.
+    rather than waiting for the entire reply to finish. Returns the
+    total duration (seconds) of audio actually sent, so the caller can
+    tell "bytes fully sent" apart from "customer has actually heard
+    it" — closing the connection right after this returns would still
+    cut audio off mid-playback, since sending completes almost
+    instantly while playback takes the audio's real duration.
     """
     audio_queue = queue.Queue()
     SENTINEL = object()
+    total_audio_seconds = 0.0
 
     def on_sentence(sentence_text):
+        nonlocal total_audio_seconds
         print(f"[SPARK] {sentence_text}")
         pcm_bytes, native_rate = tts.synthesize_to_pcm(sentence_text)
         pcm_8k = resample_pcm16(pcm_bytes, native_rate, EXOTEL_SAMPLE_RATE).tobytes()
+        # PCM16 = 2 bytes per sample.
+        total_audio_seconds += len(pcm_8k) / 2 / EXOTEL_SAMPLE_RATE
         audio_queue.put(pcm_8k)
 
     def run_chat():
@@ -137,6 +159,7 @@ async def run_turn(ws, chat, stream_sid, user_message):
         await send_pcm_as_media(ws, stream_sid, item)
 
     await thread_task
+    return total_audio_seconds
 
 
 async def _continue_batch():
@@ -215,8 +238,32 @@ async def handle(ws):
 
     print("[EXOTEL] Connection opened.")
 
+    # Generous — during a genuinely active call, Exotel streams audio
+    # continuously (every few hundred ms), so messages should never
+    # stop arriving for anywhere close to this long. This is NOT
+    # relying on websockets' own ping/pong keepalive (default ~20s
+    # ping interval + ~20s ping timeout) or on the connection cleanly
+    # closing — calls route through an ngrok tunnel, which sits
+    # between Exotel and this server and can mask an upstream
+    # disconnect, leaving the local connection looking alive with no
+    # ConnectionClosed ever raised. This is an explicit, application-
+    # level backstop that doesn't depend on the tunnel or library
+    # defaults behaving as expected — the actual observed failure mode
+    # this targets (a hang well past 30s with no ConnectionClosed).
+    INACTIVITY_TIMEOUT_SECONDS = 45
+
     try:
-        async for raw_message in ws:
+        while True:
+            try:
+                raw_message = await asyncio.wait_for(ws.recv(), timeout=INACTIVITY_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                print(
+                    f"[EXOTEL] No message received for {INACTIVITY_TIMEOUT_SECONDS}s "
+                    f"— treating connection as dead and ending this call."
+                )
+                call_errored = True
+                break
+
             event = json.loads(raw_message)
             event_type = event.get("event")
 
@@ -264,7 +311,17 @@ async def handle(ws):
                 pcm_bytes, native_rate = tts.synthesize_to_pcm(opening)
                 pcm_8k = resample_pcm16(pcm_bytes, native_rate, EXOTEL_SAMPLE_RATE).tobytes()
                 await send_pcm_as_media(ws, stream_sid, pcm_8k)
-                mute_until = time.time() + MUTE_GRACE_SECONDS
+                # Scaled by the opening's own spoken duration, not just a
+                # flat grace period — the opening is the longest single
+                # utterance in the whole call, so it has the most time
+                # for a customer to start talking partway through it,
+                # meaning the largest possible backlog to flush before
+                # live listening should resume. A fixed 1.0s grace was
+                # observed letting speech from partway through a long
+                # opening slip past the mute window and get treated as
+                # live input.
+                opening_seconds = len(pcm_8k) / 2 / EXOTEL_SAMPLE_RATE
+                mute_until = time.time() + MUTE_GRACE_SECONDS + (opening_seconds * 0.15)
 
             elif event_type == "media":
                 if detector is None:
@@ -341,18 +398,29 @@ async def handle(ws):
                         await send_pcm_as_media(ws, stream_sid, pcm_8k)
                         mute_until = time.time() + MUTE_GRACE_SECONDS
                     elif result["text"].strip():
-                        await run_turn(ws, chat, stream_sid, result["text"])
-                        mute_until = time.time() + MUTE_GRACE_SECONDS
+                        audio_seconds = await run_turn(ws, chat, stream_sid, result["text"])
+                        # Same scaling as the opening message — a longer
+                        # reply means more time for a larger backlog to
+                        # accumulate if the customer starts talking
+                        # partway through it.
+                        mute_until = time.time() + MUTE_GRACE_SECONDS + (audio_seconds * 0.15)
 
                         if chat.call_finished:
-                            # Mirrors what the local CLI (main.py)
-                            # already does — the call is genuinely over
-                            # (auto-end fast path fired). Close it from
-                            # our side instead of continuing to listen,
-                            # which previously meant crashing later
-                            # when Exotel's own side eventually killed
-                            # the connection out from under us mid-send.
-                            print("[EXOTEL] Call finished — closing connection.")
+                            # run_turn() only waits for audio to be SENT
+                            # (a fast network write), not for it to
+                            # actually finish PLAYING on the customer's
+                            # phone — those are very different timescales.
+                            # Closing right after send() previously cut
+                            # the final message off mid-sentence. Wait
+                            # for the real playback duration (plus a
+                            # small buffer) before actually hanging up.
+                            print(
+                                f"[EXOTEL] Call finished — waiting "
+                                f"{audio_seconds:.1f}s for final audio "
+                                f"to finish playing."
+                            )
+                            await asyncio.sleep(audio_seconds + 0.5)
+                            print("[EXOTEL] Closing connection.")
                             await ws.close()
                             break
 
@@ -360,11 +428,14 @@ async def handle(ws):
                 print("[EXOTEL] stop — call ended.")
                 break
 
-    except (websockets.exceptions.ConnectionClosed, ConnectionError, OSError) as e:
+    except (websockets.exceptions.ConnectionClosed, ConnectionError, OSError, asyncio.TimeoutError) as e:
         # An unexpected disconnect (network drop, Exotel ending the call
         # from their side, etc) should end THIS call, not crash the
         # whole server process — every other call and the loaded models
-        # stay alive for the next one.
+        # stay alive for the next one. asyncio.TimeoutError specifically
+        # comes from send_pcm_as_media's internal timeout — a hang
+        # there means the connection is effectively dead even without
+        # an explicit ConnectionClosed having been raised yet.
         print(f"[EXOTEL] Connection error, ending this call: {e}")
         call_errored = True
 

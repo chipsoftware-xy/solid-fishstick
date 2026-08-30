@@ -141,6 +141,22 @@ def add_numbers_to_queue(phone_numbers):
     conn.close()
 
 
+def add_number_and_get_id(phone):
+    """Inserts a single number and returns its new row id — used by
+    the homepage's quick single-number dial, so that call gets
+    tracked in Call Queue like any other (marked 'calling' right
+    after this), rather than bypassing tracking entirely."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.execute(
+        "INSERT INTO call_queue (phone, status, uploaded_at) VALUES (?, 'pending', datetime('now'))",
+        (phone,),
+    )
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return new_id
+
+
 def set_queue_status(queue_id, status):
     conn = sqlite3.connect(DB_PATH)
     if status == "calling":
@@ -222,6 +238,16 @@ def mark_stale_calls_as_failed():
     rows_updated = cursor.rowcount
     conn.close()
     return rows_updated
+
+
+def clear_queue():
+    """Deletes every entry in call_queue, regardless of status —
+    used by the Call Queue page's "Clear All" action. Destructive and
+    irreversible; the UI confirms with the user before calling this."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM call_queue")
+    conn.commit()
+    conn.close()
 
 
 def get_next_pending():

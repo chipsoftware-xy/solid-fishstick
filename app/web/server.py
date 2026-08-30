@@ -19,7 +19,7 @@ from flask import Flask, render_template, redirect, url_for, flash, request
 
 from app.conversation.call_runner import run_call
 from app.conversation.voice_session import VoiceSession
-from app.call_storage import DB_PATH, delete_call as _delete_call, add_numbers_to_queue, get_queue, set_queue_status, get_next_pending, mark_stale_calls_as_failed
+from app.call_storage import DB_PATH, delete_call as _delete_call, add_numbers_to_queue, get_queue, set_queue_status, get_next_pending, mark_stale_calls_as_failed, clear_queue, add_number_and_get_id
 from telephony.dialer import (
     place_call,
     ExotelConfigError,
@@ -33,6 +33,18 @@ from app.llm.knowledge_prompts import EMPLOYEE_ID_PROMPT
 
 app = Flask(__name__)
 app.secret_key = "spark-local-dev"  # local-only app, no real auth surface
+
+SPARK_VERSION = "1.0"
+
+
+@app.context_processor
+def inject_footer_info():
+    """Makes spark_version and current_year available in every
+    template automatically — base.html's footer uses these — without
+    needing every single route's render_template() call to pass them
+    individually."""
+    import datetime
+    return {"spark_version": SPARK_VERSION, "current_year": datetime.date.today().year}
 
 # Guards against starting a second call while one is already using the
 # mic/speakers — both are single, shared local hardware resources. Also
@@ -153,6 +165,21 @@ def _run_call_and_release():
 
 @app.route("/")
 def index():
+    # Run here too, not just on /call-queue — this is the page you'd
+    # actually be looking at between calls during a real batch, and
+    # the stale-call safety net only ever runs when SOMEONE loads a
+    # page that checks it. If the whole process dies (crash, manual
+    # kill, anything) mid-call, nothing else would ever catch that
+    # stuck entry otherwise.
+    caught = mark_stale_calls_as_failed()
+    if caught:
+        # A stuck entry means the batch that was dialing it is
+        # effectively dead too — clear this now rather than making
+        # the user wait out the separate, longer BATCH_STALE_SECONDS
+        # timeout before they can start a new one.
+        BATCH_ACTIVE_PATH.unlink(missing_ok=True)
+        flash(f"{caught} call(s) stuck on 'calling' for too long — marked as failed.")
+
     with _call_lock:
         in_progress = _call_in_progress
     return render_template(
@@ -251,6 +278,39 @@ def start_calling_queue():
     BATCH_ACTIVE_PATH.touch()
     set_queue_status(next_entry["id"], "calling")
     flash(f"Started calling queue — dialing {next_entry['phone']}.")
+    return redirect(url_for("index"))
+
+
+@app.route("/call-number", methods=["POST"])
+def call_single_number():
+    """
+    Dials one number directly from the homepage — no need to build an
+    Excel sheet just to test a single number. Deliberately NOT gated
+    on batch state (unlike start_calling_queue) since this is a one-off
+    dial, not part of a sequence — same reasoning as Call Queue's
+    per-row Call button. Added to Call Queue and marked 'calling'
+    immediately, so it's tracked and shows up in the Calling/Done/
+    Failed buckets like any other call, rather than bypassing tracking.
+    """
+    raw_phone = request.form.get("phone", "").strip()
+    if not raw_phone:
+        flash("Enter a phone number to call.")
+        return redirect(url_for("index"))
+
+    phone = normalize_phone(raw_phone)
+
+    try:
+        place_call(phone, get_exotel_settings())
+    except ExotelConfigError as e:
+        flash(str(e))
+        return redirect(url_for("index"))
+    except Exception as e:
+        flash(f"Call failed to place: {e}")
+        return redirect(url_for("index"))
+
+    queue_id = add_number_and_get_id(phone)
+    set_queue_status(queue_id, "calling")
+    flash(f"Calling {phone}.")
     return redirect(url_for("index"))
 
 
@@ -454,6 +514,16 @@ def retry_call(queue_id):
     everything else retryable in this app."""
     set_queue_status(queue_id, "pending")
     flash("Moved back to pending — click Call, or it'll be picked up by the next batch run.")
+    return redirect(url_for("call_queue"))
+
+
+@app.route("/call-queue/clear-all", methods=["POST"])
+def clear_all_queue():
+    """Deletes every entry in Call Queue, regardless of status.
+    Destructive and irreversible — the template confirms with the
+    user via a JS dialog before this route is ever hit."""
+    clear_queue()
+    flash("Call Queue cleared.")
     return redirect(url_for("call_queue"))
 
 
