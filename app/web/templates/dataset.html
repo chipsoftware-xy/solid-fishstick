@@ -18,16 +18,12 @@
             </form>
 
             <h2 class="dataset__section-title">
-                <button type="submit" form="bulk-delete-{{ key }}" class="dataset__bulk-btn">
-                    Delete Selected
-                </button>
+                <button type="submit" form="bulk-delete-{{ key }}" class="dataset__bulk-btn">Delete Selected</button>
                 {{ label }} ({{ buckets[key]|length }})
             </h2>
 
             {% if key == 'incomplete' %}
-                <p class="dataset__note">
-                    Re-enter these numbers in your next run if they're still relevant.
-                </p>
+                <p class="dataset__note">Re-enter these numbers in your next run if they're still relevant.</p>
             {% endif %}
 
             {% if buckets[key] %}
@@ -35,79 +31,42 @@
                     <thead>
                         <tr>
                             <th></th>
-
                             <th>
-                                {% if key in ['rejected', 'incomplete'] %}
-                                    <input
-                                        type="checkbox"
-                                        class="dataset__select-all"
-                                        data-section="{{ key }}"
-                                        title="Select all"
-                                    >
+                                {% if key != 'scheduled' %}
+                                    <input type="checkbox" title="Select all"
+                                           onchange="document.querySelectorAll('input[form=bulk-delete-{{ key }}]').forEach(cb => cb.checked = this.checked)">
                                 {% endif %}
                             </th>
-
                             <th>Name</th>
                             <th>Organization</th>
                             <th>Callback Time</th>
+                            <th>Phone Number</th>
                         </tr>
                     </thead>
-
                     <tbody>
                         {% for call in buckets[key] %}
                             <tr>
                                 <td>
-                                    <form method="post"
-                                          action="{{ url_for('delete_call_route', call_id=call.id) }}"
+                                    <form method="post" action="{{ url_for('delete_call_route', call_id=call.id) }}"
                                           onsubmit="return confirm('Delete this call?');">
-                                        <button type="submit" class="dataset__row-delete">
-                                            Delete
-                                        </button>
+                                        <button type="submit" class="dataset__row-delete">Delete</button>
                                     </form>
                                 </td>
-
-                                <td>
-                                    <input
-                                        type="checkbox"
-                                        name="call_ids"
-                                        value="{{ call.id }}"
-                                        form="bulk-delete-{{ key }}"
-                                        class="dataset__call-checkbox-{{ key }}"
-                                    >
-                                </td>
-
+                                <td><input type="checkbox" name="call_ids" value="{{ call.id }}" form="bulk-delete-{{ key }}"></td>
                                 <td>{{ call.name or '—' }}</td>
                                 <td>{{ call.company or '—' }}</td>
                                 <td>{{ call.callback_time or '—' }}</td>
+                                <td>{{ call.phone or '—' }}</td>
                             </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             {% else %}
-                <p class="placeholder__body">
-                    No calls in this category yet.
-                </p>
+                <p class="placeholder__body">No calls in this category yet.</p>
             {% endif %}
         </section>
     {% endfor %}
 
     <a href="{{ url_for('index') }}" class="placeholder__back">&larr; Back</a>
 </main>
-
-<script>
-    document.querySelectorAll('.dataset__select-all').forEach(selectAll => {
-        selectAll.addEventListener('change', function () {
-            const section = this.dataset.section;
-
-            const checkboxes = document.querySelectorAll(
-                `.dataset__call-checkbox-${section}`
-            );
-
-            checkboxes.forEach(checkbox => {
-                checkbox.checked = this.checked;
-            });
-        });
-    });
-</script>
-
 {% endblock %}

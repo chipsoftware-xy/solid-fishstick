@@ -89,6 +89,9 @@ def finalize_call(chat_session, phone=None):
     init_db()
     save_call(record)
 
+    # Post-call WhatsApp messaging is handled by Exotel's own app flow
+    # directly, not from here — no send hook needed in this codebase.
+
     print(
         f"[CALL] Finalized — status: {record['status']}, "
         f"name: {record['name']}, company: {record['company']}, "

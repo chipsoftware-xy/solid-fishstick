@@ -22,12 +22,17 @@ Setup (same as before, nothing new):
 """
 import asyncio
 import base64
+import gc
 import json
 import queue
 import time
+import uuid
 from pathlib import Path
 
+import psutil
+
 import websockets
+import numpy as np
 
 from telephony.stream_vad import CallTurnDetector, _compute_rms
 from telephony.audio_utils import resample_pcm16, pcm16_to_whisper_input
@@ -39,7 +44,7 @@ from app.llm.chat_session import ChatSession
 from app.llm.ollama_client import LLM
 from app.knowledge_base import KnowledgeBase
 from app.call_finalizer import finalize_call
-from app.call_storage import mark_done_by_phone, mark_failed_by_phone, get_next_pending, set_queue_status
+from app.call_storage import mark_done_by_phone, mark_failed_by_phone, get_next_pending, set_queue_status, save_call, init_db
 
 VAD_SETTINGS = {
     "vad_aggressiveness": 2,
@@ -58,6 +63,26 @@ VAD_SETTINGS = {
 
 WHISPER_SAMPLE_RATE = 16000
 EXOTEL_SAMPLE_RATE = 8000
+
+# Confirmed via direct measurement: this process's memory footprint
+# grows call over call (not a reference leak - gc.collect() confirmed
+# it can't reclaim it, since CPython's allocator just doesn't hand
+# freed memory back to the OS), and that growth measurably correlates
+# with slower first-turn LLM latency on subsequent calls. Restarting
+# the whole process periodically is the only reliable fix - see the
+# full explanation at the restart-trigger site below.
+#
+# Primary trigger is REACTIVE (turn 1's actual prompt-eval time), not
+# a fixed call count - confirmed directly that the slowdown can hit as
+# early as the SECOND call (1061MB baseline -> 1.88s vs. 1345MB
+# baseline -> 9.39s, back to back). A fixed count high enough to be
+# safe would let most calls in a batch eat the slow-turn-1 penalty
+# before ever restarting. MAX_CALLS_BEFORE_RESTART is kept as a safety
+# net only, in case the threshold happens not to fire for a while.
+FIRST_TURN_EVAL_RESTART_THRESHOLD_SECONDS = 5.0
+MAX_CALLS_BEFORE_RESTART = 20
+_completed_call_count = 0
+_shutdown_event = None  # created inside main(), since it needs a running event loop
 # Within Exotel's documented 3200-100000 byte range, a multiple of 320.
 # 3200 bytes at 8kHz/16-bit mono = 200ms of audio per outgoing chunk.
 OUTGOING_CHUNK_BYTES = 3200
@@ -74,7 +99,7 @@ OUTGOING_CHUNK_BYTES = 3200
 BATCH_ACTIVE_PATH = Path("data/batch_active")
 BATCH_STOP_SIGNAL_PATH = Path("data/batch_stop_signal")
 ACTIVE_CALL_ID_PATH = Path("data/active_call_id.txt")
-PAUSE_BETWEEN_CALLS_SECONDS = 150  # 2.5 minutes
+PAUSE_BETWEEN_CALLS_SECONDS = 90  # 1.5 minutes
 
 # Real testing data: confirmed hallucinations/deliberate-gibberish
 # transcriptions measured avg_logprob -1.25 to -3.27; confirmed genuine
@@ -90,6 +115,22 @@ stt = DualTierSTT(fast_model="base", accurate_model="small")
 tts = TTS()
 llm = LLM()
 knowledge = KnowledgeBase()
+
+# Warms up both Whisper tiers with a throwaway call each, same
+# principle as the existing Ollama warmup in ollama_client.py.
+# Confirmed real cost: a customer's actual first turn measured
+# stt_time=17.76s and returned an empty transcript — the model object
+# being constructed doesn't mean the first real inference call is
+# fast; there's a separate, one-time cost (kernel compilation, first
+# touch of memory-mapped weights) that only shows up on first genuine
+# use. Paying that here, before any real call can arrive, instead of
+# a real customer sitting through it as dead air.
+print("Warming up STT models...")
+_warmup_audio = np.zeros(16000, dtype=np.float32)  # 1s of silence at 16kHz
+stt.transcribe_array(_warmup_audio, duration_s=1.0)   # warms the "small" tier
+stt.transcribe_array(_warmup_audio, duration_s=3.0)   # warms the "base" tier
+print("STT models warmed up.")
+
 print("Shared resources ready.")
 
 
@@ -215,6 +256,7 @@ async def handle(ws):
     customer_phone = None
     call_sample_rate = 8000
     call_errored = False
+    _first_turn_was_slow = False
 
     # Set to a future timestamp every time Spark finishes speaking
     # (opening message AND every run_turn reply) — while time.time() is
@@ -236,7 +278,8 @@ async def handle(ws):
     mute_until = 0.0
     MUTE_GRACE_SECONDS = 1.0
 
-    print("[EXOTEL] Connection opened.")
+    _mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+    print(f"[EXOTEL] Connection opened. [TIMING-DEBUG] wall clock: {time.strftime('%H:%M:%S.')}{int(time.time()*1000)%1000:03d} [MEM-DEBUG] RSS at connection start: {_mem_mb:.1f} MB")
 
     # Generous — during a genuinely active call, Exotel streams audio
     # continuously (every few hundred ms), so messages should never
@@ -287,6 +330,52 @@ async def handle(ws):
                 call_sample_rate = int(media_format.get("sample_rate", 8000))
                 print(f"[EXOTEL] start — media_format={media_format}")
 
+                # This machine's CPU has no real headroom for a second,
+                # simultaneous conversation — Ollama/Whisper/Piper would
+                # all be competing for the same limited resource,
+                # degrading both calls rather than handling either one
+                # well. Rather than silently accept a second call and
+                # let both callers get a slow, degraded experience,
+                # detect this up front (an existing call is already
+                # tracked via ACTIVE_CALL_ID_PATH) and decline cleanly
+                # with a short message instead. Deliberately checked
+                # BEFORE creating a detector/ChatSession for this
+                # connection — no need to spin up real resources for a
+                # call we're about to end anyway.
+                if ACTIVE_CALL_ID_PATH.exists():
+                    print(
+                        f"[EXOTEL] Already on a call — declining this one "
+                        f"from {customer_phone!r} with a short message."
+                    )
+                    busy_text = "We will contact you soon. Regards, Smart Chip Tree."
+                    pcm_bytes, native_rate = tts.synthesize_to_pcm(busy_text)
+                    pcm_8k = resample_pcm16(pcm_bytes, native_rate, EXOTEL_SAMPLE_RATE).tobytes()
+                    await send_pcm_as_media(ws, stream_sid, pcm_8k)
+                    await asyncio.sleep(len(pcm_8k) / 2 / EXOTEL_SAMPLE_RATE + 0.5)
+
+                    # Logged directly (not via finalize_call, which
+                    # expects a real ChatSession) so a missed callback
+                    # while busy is still visible in call history
+                    # rather than silently vanishing — worth following
+                    # up on manually, even though no conversation
+                    # happened.
+                    init_db()
+                    save_call({
+                        "call_id": uuid.uuid4().hex,
+                        "phone": customer_phone,
+                        "name": None,
+                        "company": None,
+                        "sector": None,
+                        "requirements": None,
+                        "quantity": None,
+                        "brands": None,
+                        "location": None,
+                        "callback_time": None,
+                        "status": "missed_busy",
+                        "transcript": "[]",
+                    })
+                    break
+
                 detector = CallTurnDetector(sample_rate=call_sample_rate, settings=VAD_SETTINGS)
                 chat = ChatSession(llm=llm, knowledge=knowledge)
 
@@ -323,6 +412,23 @@ async def handle(ws):
                 opening_seconds = len(pcm_8k) / 2 / EXOTEL_SAMPLE_RATE
                 mute_until = time.time() + MUTE_GRACE_SECONDS + (opening_seconds * 0.15)
 
+                # Tracks genuine customer silence — distinct from
+                # INACTIVITY_TIMEOUT_SECONDS above, which only fires if
+                # messages stop arriving AT ALL (a dead connection).
+                # Exotel streams audio continuously even while the
+                # customer says nothing, so that timeout alone would
+                # never catch "still connected, but not responding" —
+                # a muted mic, background noise masking their voice, or
+                # just not answering. last_activity_at updates on every
+                # genuine customer turn; if too much time passes without
+                # one, proactively check in rather than leaving them in
+                # silence, then actually end the call if that also gets
+                # no response.
+                last_activity_at = time.time()
+                silence_prompted = False
+                SILENCE_PROMPT_SECONDS = 10
+                SILENCE_HANGUP_SECONDS = 20
+
             elif event_type == "media":
                 if detector is None:
                     continue
@@ -332,6 +438,51 @@ async def handle(ws):
                     # whether it's the customer talking mid-monologue,
                     # backlog flushing through, or actual TTS echo.
                     continue
+
+                # Keep last_activity_at fresh whenever the customer is
+                # actively mid-utterance, not only once a turn fully
+                # completes. Without this, a long, slow, or naturally
+                # pause-heavy answer that takes more than
+                # SILENCE_PROMPT_SECONDS to finish could get wrongly
+                # interrupted by the "are you still there?" check-in
+                # mid-sentence — confirmed directly: the VAD was one
+                # silence frame away from closing out a real turn when
+                # the check-in fired anyway, spoke over the customer,
+                # and the resulting mute window then dropped exactly
+                # the frames needed to finish, restarting the cycle.
+                # detector.triggered reflects state as of the last
+                # PROCESSED frame, so checking it here (before this
+                # frame is processed) still correctly reflects whether
+                # they were actively talking a moment ago.
+                if detector.triggered:
+                    last_activity_at = time.time()
+                    silence_prompted = False
+
+                silence_elapsed = time.time() - last_activity_at
+                if silence_elapsed > SILENCE_HANGUP_SECONDS:
+                    print(
+                        f"[EXOTEL] No response for {SILENCE_HANGUP_SECONDS}s "
+                        f"after the check-in prompt — ending call as unresponsive."
+                    )
+                    reply_text = "I'm having trouble hearing you, so I'll let you go for now. Feel free to call back anytime — have a great day!"
+                    print(f"[SPARK] {reply_text}")
+                    pcm_bytes, native_rate = tts.synthesize_to_pcm(reply_text)
+                    pcm_8k = resample_pcm16(pcm_bytes, native_rate, EXOTEL_SAMPLE_RATE).tobytes()
+                    await send_pcm_as_media(ws, stream_sid, pcm_8k)
+                    await asyncio.sleep(len(pcm_8k) / 2 / EXOTEL_SAMPLE_RATE + 0.5)
+                    break
+                elif silence_elapsed > SILENCE_PROMPT_SECONDS and not silence_prompted:
+                    silence_prompted = True
+                    print(f"[EXOTEL] {SILENCE_PROMPT_SECONDS}s of silence — proactively checking in.")
+                    reply_text = "Sorry, I'm not able to hear you — are you still there?"
+                    print(f"[SPARK] {reply_text}")
+                    pcm_bytes, native_rate = tts.synthesize_to_pcm(reply_text)
+                    pcm_8k = resample_pcm16(pcm_bytes, native_rate, EXOTEL_SAMPLE_RATE).tobytes()
+                    await send_pcm_as_media(ws, stream_sid, pcm_8k)
+                    prompt_seconds = len(pcm_8k) / 2 / EXOTEL_SAMPLE_RATE
+                    mute_until = time.time() + MUTE_GRACE_SECONDS + (prompt_seconds * 0.15)
+                    continue
+
                 payload = event["media"]["payload"]
                 turn_audio = detector.add_media_payload(payload)
 
@@ -355,9 +506,12 @@ async def handle(ws):
                     timestamp = time.strftime("%H:%M:%S")
                     logprob = result.get("avg_logprob")
                     logprob_str = f"{logprob:.3f}" if logprob is not None else "N/A"
+                    stt_duration = result.get("duration")
+                    stt_duration_str = f"{stt_duration:.2f}s" if stt_duration is not None else "N/A"
                     print(
                         f"[CUSTOMER @ {timestamp}] {result['text']!r} "
-                        f"(model={result['model_used']}, rms={turn_rms:.1f}, avg_logprob={logprob_str})"
+                        f"(model={result['model_used']}, rms={turn_rms:.1f}, "
+                        f"avg_logprob={logprob_str}, stt_time={stt_duration_str})"
                     )
 
                     # A bare "thank you"/"thanks" is a well-documented
@@ -397,13 +551,41 @@ async def handle(ws):
                         pcm_8k = resample_pcm16(pcm_bytes, native_rate, EXOTEL_SAMPLE_RATE).tobytes()
                         await send_pcm_as_media(ws, stream_sid, pcm_8k)
                         mute_until = time.time() + MUTE_GRACE_SECONDS
+                        last_activity_at = time.time()
+                        silence_prompted = False
                     elif result["text"].strip():
+                        _turn_start = time.perf_counter()
+                        print(f"[TIMING-DEBUG] run_turn() starting — wall clock: {time.strftime('%H:%M:%S.')}{int(time.time()*1000)%1000:03d}")
                         audio_seconds = await run_turn(ws, chat, stream_sid, result["text"])
+                        print(f"[TIMING-DEBUG] run_turn() total wall time: {time.perf_counter() - _turn_start:.3f}s")
+                        _mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+                        print(f"[MEM-DEBUG] this process RSS after turn: {_mem_mb:.1f} MB")
+
+                        # Checked specifically on the call's FIRST real
+                        # turn — this is the exact signal confirmed to
+                        # correlate with this process's growing memory
+                        # footprint (see FIRST_TURN_EVAL_RESTART_THRESHOLD_SECONDS
+                        # above). Not checked on later turns, since the
+                        # knowledge-injection turns have their own,
+                        # separate, already-diagnosed cost that
+                        # shouldn't get conflated with this signal.
+                        if chat.exchange_count == 1 and chat.last_prompt_eval_seconds is not None:
+                            if chat.last_prompt_eval_seconds > FIRST_TURN_EVAL_RESTART_THRESHOLD_SECONDS:
+                                _first_turn_was_slow = True
+                                print(
+                                    f"[RESTART-DEBUG] Turn 1 prompt-eval "
+                                    f"({chat.last_prompt_eval_seconds:.2f}s) exceeded "
+                                    f"the {FIRST_TURN_EVAL_RESTART_THRESHOLD_SECONDS}s "
+                                    f"threshold — this process will restart once "
+                                    f"this call ends."
+                                )
                         # Same scaling as the opening message — a longer
                         # reply means more time for a larger backlog to
                         # accumulate if the customer starts talking
                         # partway through it.
                         mute_until = time.time() + MUTE_GRACE_SECONDS + (audio_seconds * 0.15)
+                        last_activity_at = time.time()
+                        silence_prompted = False
 
                         if chat.call_finished:
                             # run_turn() only waits for audio to be SENT
@@ -448,7 +630,23 @@ async def handle(ws):
         # unconditionally too). chat is None if the connection dropped
         # before the "start" event ever arrived — nothing to save yet.
         if chat is not None:
+            _cleanup_start = time.perf_counter()
             finalize_call(chat, phone=customer_phone)
+            print(f"[TIMING-DEBUG] finalize_call() took {time.perf_counter() - _cleanup_start:.3f}s")
+
+            # Counts toward the restart threshold below only if this
+            # was a genuine, real conversation — not a missed_busy
+            # rejection (those never even create a ChatSession, so
+            # chat is None and this block never runs for them) and not
+            # a zero-interaction hangup (connects, plays the opening,
+            # then ends with no customer turn at all).
+            if chat.exchange_count > 0:
+                global _completed_call_count
+                _completed_call_count += 1
+                print(f"[RESTART-DEBUG] Completed calls this session: {_completed_call_count}/{MAX_CALLS_BEFORE_RESTART}")
+
+            _mem_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+            print(f"[MEM-DEBUG] RSS at call end: {_mem_mb:.1f} MB")
 
             # Call genuinely over — clear the "live" marker so Flask's
             # live-transcript endpoint correctly reports nothing in
@@ -475,12 +673,45 @@ async def handle(ws):
             if BATCH_ACTIVE_PATH.exists():
                 await _continue_batch()
 
+            # Confirmed via direct measurement (gc.collect() froze at
+            # 0.0 MB freed across two real calls, despite genuinely
+            # collecting hundreds of garbage objects each time): this
+            # machine's process memory footprint grows call over call
+            # not because of a reference leak in our own code, but
+            # because CPython's allocator doesn't hand freed memory
+            # back to the OS. That growing footprint measurably
+            # correlates with slower first-turn prompt-eval on the
+            # NEXT call (1061MB->1.88s vs 1345MB->9.39s, confirmed
+            # directly) - likely because it pressures Windows into
+            # evicting some of Ollama's memory-mapped model-weight
+            # pages, which then have to be re-read from disk. A clean
+            # process restart is the only reliable way to actually
+            # return this memory - there's no Windows equivalent to
+            # Linux's malloc_trim() that would reclaim it without one.
+            if _first_turn_was_slow or _completed_call_count >= MAX_CALLS_BEFORE_RESTART:
+                reason = (
+                    "turn 1's prompt-eval crossed the threshold this call"
+                    if _first_turn_was_slow
+                    else f"reached the {MAX_CALLS_BEFORE_RESTART}-call safety-net limit"
+                )
+                print(
+                    f"[RESTART] Restarting the process ({reason}) — releasing "
+                    f"accumulated memory before it affects the next call's "
+                    f"latency. The launcher script should relaunch "
+                    f"automatically."
+                )
+                _shutdown_event.set()
+
 
 async def main():
+    global _shutdown_event
+    _shutdown_event = asyncio.Event()
+
     print("Two-way pipeline test server listening on ws://0.0.0.0:5001")
     print("Run 'ngrok http 5001' (or cloudflared) in another terminal to expose this publicly.")
     async with websockets.serve(handle, "0.0.0.0", 5001):
-        await asyncio.Future()
+        await _shutdown_event.wait()
+    print("[RESTART] Server closed. Exiting process for the launcher to relaunch.")
 
 
 if __name__ == "__main__":

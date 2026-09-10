@@ -25,9 +25,14 @@
 
         <form method="post" action="{{ url_for('call_single_number') }}"
               class="{{ 'hidden' if (batch_active or call_in_progress) else '' }} quick-dial">
-            <input type="tel" name="phone" placeholder="or enter a number to call" class="quick-dial__input">
+            <input type="tel" name="phone" placeholder=" only (+91) are valid to call" class="quick-dial__input">
             <button type="submit" class="btn-outline">Call</button>
         </form>
+
+        <p class="refresh-hint">
+            Calling the same number multiple times can get it blocked from the
+            service end — use unique numbers in each batch.
+        </p>
 
         <div class="live-transcript">
             <p class="last-call__label">Live Transcript</p>

@@ -64,12 +64,12 @@ def _prepare_text(text: str) -> str:
     # reads as the standalone word pushes it toward the right sound.
     text = re.sub(r"\bmifare\b", "My-fare", text, flags=re.IGNORECASE)
     # This specific voice model consistently mispronounces "great" —
-    # tried "wonderful" first, but that also came out wrong (likely the
-    # multi-syllable schwa+r combination). "good" is shorter and far
-    # more phonetically simple, lower risk of the same problem — but
-    # this is a best guess without being able to hear the actual
-    # output; may need further adjustment.
-    text = _replace_preserving_case(r"\bgreat\b", "good", text)
+    # "good" was tried first as a lower-risk guess, but still came out
+    # wrong per direct testing. Switching to "perfect" instead — this
+    # word is already used repeatedly in the closing line across many
+    # test calls with zero reported pronunciation issues, so there's
+    # real evidence behind this choice rather than another guess.
+    text = _replace_preserving_case(r"\bgreat\b", "perfect", text)
     # Same category of issue reported for "okay" — replacing with
     # "alright" as a first attempt for the same reason.
     text = _replace_preserving_case(r"\bokay\b", "alright", text)

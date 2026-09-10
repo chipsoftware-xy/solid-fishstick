@@ -9,6 +9,9 @@ from app.conversation.voice_session import VoiceSession
 from app.audio.recording import record_on_voice_activity
 from app.call_finalizer import finalize_call
 
+import app.llm.chat_session as chat_session_module
+import app.call_storage as call_storage_module
+
 
 def run_call(voice=None, stop_event=None):
     """
@@ -35,43 +38,78 @@ def run_call(voice=None, stop_event=None):
     main thread, not a background thread a call is running in, so it
     can't be used to stop a call started from the web UI at all.
     """
-    if voice is None:
-        voice = VoiceSession()
-    else:
-        voice.start_new_call()
+    # Local-mic test calls share the exact same ChatSession and
+    # finalize_call() as real Exotel calls (two_way_test.py) — without
+    # this redirect, both would write to the same data/spark.db and
+    # transcripts/ folder, meaning a local test run would show up mixed
+    # in with real call history later with no way to tell them apart.
+    #
+    # Scoped to ONLY this function's duration, via try/finally below —
+    # NOT at module-import time. That was a real, confirmed bug: this
+    # file gets imported by server.py just to make run_call/VoiceSession
+    # available to the web UI, regardless of whether a local test is
+    # actually running. Reassigning these paths at import time meant
+    # the redirect fired the instant server.py started, permanently
+    # affecting every OTHER database operation in the same process too
+    # — including mark_stale_calls_as_failed() on the homepage route,
+    # which then failed with "no such table: call_queue" because it
+    # was silently pointed at the new, empty local-test database
+    # instead of the real one.
+    original_chat_transcript_dir = chat_session_module.TRANSCRIPT_DIR
+    original_storage_db_path = call_storage_module.DB_PATH
+    original_storage_transcript_dir = call_storage_module.TRANSCRIPT_DIR
 
-    print("\nSpark is listening. Just speak — no keypress needed.")
-    print("The call ends automatically once wrapped up, or press Ctrl+C anytime.\n")
-
-    audio_path = Path("audio/input/live_input.wav")
-    stopped_early = False
+    chat_session_module.TRANSCRIPT_DIR = Path("transcripts_local_test")
+    call_storage_module.DB_PATH = Path("data/spark_local_test.db")
+    call_storage_module.TRANSCRIPT_DIR = Path("transcripts_local_test")
+    chat_session_module.TRANSCRIPT_DIR.mkdir(exist_ok=True)
 
     try:
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                stopped_early = True
-                break
+        if voice is None:
+            voice = VoiceSession()
+        else:
+            voice.start_new_call()
 
-            record_on_voice_activity(str(audio_path))
+        print("\nSpark is listening. Just speak — no keypress needed.")
+        print("The call ends automatically once wrapped up, or press Ctrl+C anytime.\n")
 
-            result = voice.process_audio_streaming(str(audio_path))
+        audio_path = Path("audio/input/live_input.wav")
+        stopped_early = False
 
-            if not result:
-                continue
+        try:
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    stopped_early = True
+                    break
 
-            print("\n===== RESULT =====")
-            print("You  :", result["user_text"])
-            print("Spark:", result["reply"])
+                record_on_voice_activity(str(audio_path))
 
-            if voice.chat.call_finished:
-                print("\nCall wrapped up — ending automatically...")
-                break
+                result = voice.process_audio_streaming(str(audio_path))
 
-    except KeyboardInterrupt:
-        print("\n\nEnding call...")
-        stopped_early = True
+                if not result:
+                    continue
 
-    if stopped_early:
-        print("Call stopped before finishing normally.")
+                print("\n===== RESULT =====")
+                print("You  :", result["user_text"])
+                print("Spark:", result["reply"])
 
-    finalize_call(voice.chat)
+                if voice.chat.call_finished:
+                    print("\nCall wrapped up — ending automatically...")
+                    break
+
+        except KeyboardInterrupt:
+            print("\n\nEnding call...")
+            stopped_early = True
+
+        if stopped_early:
+            print("Call stopped before finishing normally.")
+
+        finalize_call(voice.chat)
+    finally:
+        # Restored unconditionally, even if the call raised — the rest
+        # of the running process (e.g. server.py's other routes) must
+        # see the real paths again immediately after this function
+        # returns, not just "eventually" or "on next restart".
+        chat_session_module.TRANSCRIPT_DIR = original_chat_transcript_dir
+        call_storage_module.DB_PATH = original_storage_db_path
+        call_storage_module.TRANSCRIPT_DIR = original_storage_transcript_dir

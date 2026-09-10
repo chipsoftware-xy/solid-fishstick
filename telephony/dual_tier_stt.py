@@ -30,12 +30,14 @@ class DualTierSTT:
     def __init__(self, fast_model="base", accurate_model="small"):
         self.fast = STT(model_size=fast_model)
         self.accurate = STT(model_size=accurate_model)
+        self._fast_model_name = fast_model
+        self._accurate_model_name = accurate_model
 
     def transcribe_array(self, samples, duration_s):
         if duration_s < SHORT_TURN_THRESHOLD_S:
-            model, model_name = self.accurate, "small"
+            model, model_name = self.accurate, self._accurate_model_name
         else:
-            model, model_name = self.fast, "base"
+            model, model_name = self.fast, self._fast_model_name
 
         result = model.transcribe_array(samples)
         result["model_used"] = model_name

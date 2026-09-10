@@ -72,6 +72,15 @@ class LLM:
             print(f"[WARN] Failed to unload model: {e}")
 
     def generate(self, messages):
+        """
+        Chat-style call (/api/chat) — kept as-is for one-off, isolated
+        calls that don't need conversation-context caching at all (the
+        name/org/time field-extraction calls in chat_session.py: each
+        is a short, independent prompt with no prior context to reuse
+        anyway). For the main multi-turn conversation itself, use
+        generate_with_context() instead — see that method's docstring
+        for why /api/chat specifically is the wrong choice there.
+        """
         start = time.perf_counter()
         response = self.client.chat(
             model=self.model,
@@ -103,15 +112,22 @@ class LLM:
             )
         return response.message.content
 
-    def generate_stream(self, messages):
+    def generate_stream(self, messages, result_holder=None):
         """
         Same call as generate(), but yields text deltas as they're
-        produced instead of waiting for the full reply. The model isn't
-        any faster — total compute time is the same — but the caller can
-        start speaking the first sentence immediately instead of sitting
-        in silence for the whole generation. Caller is responsible for
-        accumulating the deltas into the full reply (needed anyway for
-        transcript logging / conversation history).
+        produced instead of waiting for the full reply.
+
+        result_holder (optional dict): populated with 'prompt_eval_seconds'
+        once the stream completes, for the caller to read AFTER fully
+        iterating this generator — same pattern as
+        generate_with_context_stream, needed because a generator can't
+        hand back a value any other way after its last yield. Added so
+        two_way_test.py can check the FIRST turn's actual prompt-eval
+        time directly, to decide whether this session's growing memory
+        footprint has crossed the point where a process restart is
+        worth triggering (confirmed via direct measurement: this
+        process's RSS growing call-over-call correlates with slower
+        prompt-eval on the next call's first turn).
         """
         start = time.perf_counter()
         stream = self.client.chat(
@@ -131,13 +147,100 @@ class LLM:
                 final_chunk = chunk
 
         end = time.perf_counter()
-        # NOTE: unlike generate()'s "Total", this span includes whatever
-        # time the CALLER spent between pulling chunks (e.g. TTS +
-        # blocking playback in on_sentence) — it's wall clock around the
-        # whole generator, not pure model time. Use Prompt eval /
-        # Generation / Load below for the actual model-side cost.
         print(f"[LLM] Total (incl. caller processing time): {end - start:.2f}s")
         if final_chunk is not None:
+            print(f"[LLM] Prompt tokens: {final_chunk.prompt_eval_count}")
+            print(f"[LLM] Prompt eval: {final_chunk.prompt_eval_duration / 1e9:.2f}s")
+            print(f"[LLM] Output tokens: {final_chunk.eval_count}")
+            print(f"[LLM] Generation: {final_chunk.eval_duration / 1e9:.2f}s")
+            print(f"[LLM] Load: {final_chunk.load_duration / 1e9:.2f}s")
+            if result_holder is not None:
+                result_holder["prompt_eval_seconds"] = final_chunk.prompt_eval_duration / 1e9
+
+    def generate_with_context(self, prompt, system=None, context=None):
+        """
+        Uses /api/generate with a carried-forward 'context' token array,
+        instead of /api/chat's messages list. /api/chat has a confirmed,
+        documented bug on CPU (ollama/ollama issue #14780): the KV cache
+        is NEVER reused between turns, meaning the entire prompt gets
+        re-evaluated from scratch on every single call regardless of how
+        much is unchanged from the previous one. This is measured,
+        confirmed behavior in our own logs too — prompt_eval_duration
+        never dropped across a growing, mostly-static conversation.
+        /api/generate + context correctly reuses the cache, per the same
+        issue thread.
+
+        On the FIRST call of a conversation, pass system=<the system
+        prompt> and leave context=None. On every SUBSEQUENT call, pass
+        ONLY the new prompt content and the context returned by the
+        PREVIOUS call — do NOT re-pass `system`, since Ollama has
+        already baked it into that context; resending it would just add
+        it a second time.
+
+        Returns (response_text, new_context) — the caller must store
+        new_context and pass it into the next call, or caching never
+        engages at all.
+        """
+        start = time.perf_counter()
+        kwargs = {
+            "model": self.model,
+            "prompt": prompt,
+            "keep_alive": self.keep_alive,
+            "options": self.options,
+        }
+        if system is not None:
+            kwargs["system"] = system
+        if context is not None:
+            kwargs["context"] = context
+
+        response = self.client.generate(**kwargs)
+        end = time.perf_counter()
+        print(f"[LLM] Total: {end - start:.2f}s")
+        print(f"[LLM] Prompt tokens: {response.prompt_eval_count}")
+        print(f"[LLM] Prompt eval: {response.prompt_eval_duration / 1e9:.2f}s")
+        print(f"[LLM] Output tokens: {response.eval_count}")
+        print(f"[LLM] Generation: {response.eval_duration / 1e9:.2f}s")
+        print(f"[LLM] Load: {response.load_duration / 1e9:.2f}s")
+        return response.response, response.context
+
+    def generate_with_context_stream(self, prompt, result_holder, system=None, context=None):
+        """
+        Streaming version of generate_with_context(). A generator can't
+        cleanly hand back a value after its last yield the way a normal
+        function returns one — result_holder (any dict the caller
+        provides) gets populated with 'context' and the timing fields
+        once the stream completes, for the caller to read AFTER fully
+        iterating this generator. Without capturing 'context' this way,
+        there would be no way to carry it into the NEXT turn's call,
+        and caching would silently never engage.
+        """
+        start = time.perf_counter()
+        kwargs = {
+            "model": self.model,
+            "prompt": prompt,
+            "keep_alive": self.keep_alive,
+            "options": self.options,
+            "stream": True,
+        }
+        if system is not None:
+            kwargs["system"] = system
+        if context is not None:
+            kwargs["context"] = context
+
+        stream = self.client.generate(**kwargs)
+
+        final_chunk = None
+        for chunk in stream:
+            delta = chunk.response
+            if delta:
+                yield delta
+            if chunk.done:
+                final_chunk = chunk
+
+        end = time.perf_counter()
+        print(f"[LLM] Total (incl. caller processing time): {end - start:.2f}s")
+        if final_chunk is not None:
+            result_holder["context"] = final_chunk.context
             print(f"[LLM] Prompt tokens: {final_chunk.prompt_eval_count}")
             print(f"[LLM] Prompt eval: {final_chunk.prompt_eval_duration / 1e9:.2f}s")
             print(f"[LLM] Output tokens: {final_chunk.eval_count}")
