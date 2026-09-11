@@ -25,8 +25,8 @@ audio:
   vad_min_rms: 150
   vad_max_utterance_ms: 20000
 exotel:
-  api_key: 64933f82dadb879fb5449b49a34ade62dfe2fb270cbbddb6
-  api_token: 05c7444d5a6698c19a0f274e10a64ead1630425f95a610a0
-  account_sid: smartchiptree1
-  exophone: 01141186994
-  flow_id: '1323286'
+  api_key: c43835fc92157d4037c19b063ea1d6ce5932659b7ae6a306
+  api_token: 1fa1e01bde7f7f5737092e375235023d616014bf2f65602b
+  account_sid: proton184
+  exophone: 01141189593
+  flow_id: '1339542'

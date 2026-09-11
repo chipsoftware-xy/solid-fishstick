@@ -46,7 +46,7 @@ DEBUG_TIMING = True
 # before the final user message every turn is a specific, concrete
 # suspect for breaking prefix-match caching, independent of whether
 # Ollama's own caching implementation works correctly).
-DEBUG_PROMPT_DUMP = False  # temporarily re-enabled to diagnose the hallucination issue — turn back off once done
+DEBUG_PROMPT_DUMP = True  # temporarily re-enabled to diagnose the hallucination issue — turn back off once done
 
 REJECTION_PHRASES = {
     "no",
@@ -679,6 +679,33 @@ def _is_clean_affirmative(user_message: str, clean: str) -> bool:
     )
 
 
+def _is_emphatic_repeated_rejection(user_message: str) -> bool:
+    """
+    Confirmed via a real call transcript: a genuinely frustrated
+    customer repeating "no" multiple times ("No, thank you. No. No.
+    No, thank you." — 8 words) or "I don't want to know. I don't want
+    to know." (10 words) is an even clearer rejection than a single
+    "no", but BOTH exceed _is_clean_rejection's word-count guard and
+    so neither matches it at all. Direct testing confirmed this: both
+    real messages from the transcript failed that check outright.
+
+    Separate detector for this specific pattern instead of loosening
+    the word cap generally, which would risk new false positives on
+    longer, substantive messages. Splits on sentence-ending
+    punctuation and requires EVERY resulting segment to independently
+    look like a rejection — a longer single-sentence message that
+    happens to contain "no" once ("No, I think we'd actually need
+    about a hundred cards") doesn't split into multiple
+    rejection-shaped segments, so it correctly doesn't match.
+    """
+    segments = [s.strip() for s in re.split(r"[.!]+", user_message) if s.strip()]
+    if len(segments) < 2:
+        return False
+    return all(
+        _contains_phrase(_normalize(seg), REJECTION_PHRASES)
+        or bool(_fuzzy_match_short_phrase(_normalize(seg), REJECTION_PHRASES))
+        for seg in segments
+    )
 def _is_clean_rejection(user_message: str, clean: str) -> bool:
     """
     Symmetric counterpart to _is_clean_affirmative, for the exact same
@@ -896,6 +923,17 @@ class ChatSession:
         self.waiting_for_organization = False
         self.waiting_for_callback_time = False
         self.waiting_for_final_correction = False
+        self.waiting_for_product_or_callback_choice = False
+        # Confirmed via a real call transcript: exchange_count only
+        # increments inside _build_llm_messages, which the opening
+        # intercept below deliberately prevents from ever running on
+        # the first turn — so exchange_count stayed at 0 through BOTH
+        # the first turn and the customer's actual answer to it,
+        # causing the same "product or callback?" question to fire
+        # twice in a row instead of ever processing the answer.
+        # Dedicated flag instead, set the moment the question is asked
+        # and never re-checked as a "which turn is this" signal.
+        self.opening_choice_asked = False
         self.controller = ConversationController()
 
         self.customer_name = None
@@ -1054,6 +1092,104 @@ class ChatSession:
         if not self.call_started:
             self.call_started = True
             return self._reply(OPENING_MESSAGE)
+
+        # Confirmed via a real call transcript: the customer said "No,
+        # thank you. No. No. No, thank you." and, separately later in
+        # the same call, "I don't want to know. I don't want to know."
+        # — both about as clear a rejection as a customer can give.
+        # Despite an existing prompt rule against it ("don't
+        # immediately re-offer a specialist in the same breath"),
+        # gemma3:4b offered a specialist anyway, in both cases, in the
+        # very same reply that acknowledged the rejection. Deterministic
+        # intercept removes the LLM's ability to override this, same
+        # reasoning as the intercepts above — checked before anything
+        # else in this function so a clear rejection always takes
+        # priority, including over the product-or-callback question
+        # right below this.
+        if _is_emphatic_repeated_rejection(user_message):
+            self.call_finished = True
+            self.controller.close()
+            return self._reply("No problem — thank you for your time, have a great day!")
+
+        # Confirmed via a real call transcript: a bare "Yes!"/"Okay." to
+        # the opening's "do you have a quick minute?" was reaching the
+        # LLM, which then invented a specific need the customer never
+        # stated at all ("We can definitely help you streamline your
+        # employee ID program" / "we understand your need for employee
+        # ID cards" — customer had said nothing about either). The
+        # "don't assume a requirement" rule already exists in the
+        # system prompt, but gemma3:4b wasn't reliably following it
+        # here. Deterministic intercept removes the LLM's ability to
+        # guess entirely for this one specific turn — mirrors the
+        # existing name/org/callback pattern of using hardcoded logic
+        # for behavior that's too important to leave to the model.
+        #
+        # opening_choice_asked (not exchange_count) confirms this
+        # question hasn't already been asked. exchange_count only
+        # increments inside _build_llm_messages, which this intercept
+        # itself prevents from running — so exchange_count stayed at 0
+        # through both the first turn AND the customer's actual answer
+        # to it, confirmed via a real call transcript to cause the same
+        # question firing twice in a row instead of ever processing
+        # the answer. A dedicated flag, set the moment this fires, is
+        # unaffected by whether the LLM ever actually runs.
+        #
+        # Only fires on a CLEAN bare affirmative (_is_clean_affirmative
+        # already requires short, no real content, matches a known
+        # yes-phrase) — if the customer actually states a need in the
+        # same breath ("yes, we need PVC cards"), that's not a bare
+        # affirmative, so this doesn't match and the normal LLM flow
+        # handles the stated need directly, same as before.
+        if not self.opening_choice_asked and _is_clean_affirmative(user_message, clean):
+            self.opening_choice_asked = True
+            self.waiting_for_product_or_callback_choice = True
+            return self._reply(
+                "Great. Would you like to know about a specific product "
+                "or service, or would you prefer I connect you with a "
+                "specialist for a callback?"
+            )
+
+        # Handles the customer's answer to the question just above.
+        # This is a genuinely different question shape than the older
+        # specialist-offer ("would you like me to connect you with a
+        # specialist?") that _is_clean_affirmative's yes-phrases were
+        # built for — a natural answer here looks like "for a
+        # callback"/"the second one"/"specialist please", not a bare
+        # "yes". Confirmed via a real call transcript: without this,
+        # "For specialists." fell through to the general LLM (which
+        # isn't wired to start the name/org/callback flow at all),
+        # asking for a callback TIME directly and skipping name/org
+        # entirely — it only "recovered" because the customer happened
+        # to say a bare "yes" on the NEXT turn, coincidentally matching
+        # the older detector. That's luck, not correct behavior.
+        if self.waiting_for_product_or_callback_choice:
+            self.waiting_for_product_or_callback_choice = False
+            wants_callback = (
+                _contains_phrase(clean, {"specialist", "specialists", "callback", "call back", "connect"})
+                or _is_clean_affirmative(user_message, clean)
+            )
+            if wants_callback:
+                self.waiting_for_name = True
+                return self._reply("Great. May I get your name?")
+
+            # Confirmed via a real call transcript: a bare "No." here
+            # was silently falling through to the GENERAL, ungated
+            # rejection check further down in this function (checks
+            # "if clean in REJECTION_PHRASES" with no awareness this
+            # specific either/or question was just asked), which ended
+            # the call outright with "No problem at all... have a
+            # great day." A bare "no" to "product info, or a
+            # callback?" is genuinely ambiguous — could mean "no to
+            # product info, I want the callback" just as easily as "no
+            # to both" — so this asks directly instead of guessing.
+            if _is_clean_rejection(user_message, clean):
+                return self._reply(
+                    "No worries — is there anything I can help with, or "
+                    "would you like me to let you go for now?"
+                )
+            # Otherwise, they asked about a product/service — falls
+            # through to the normal LLM flow below, which answers
+            # naturally using the knowledge base as usual.
 
         # The customer's one chance to correct the time after hearing
         # the closing confirmation ("Perfect, <name>, our specialist
@@ -1474,7 +1610,7 @@ class ChatSession:
                 name_part = f"{self.customer_name}, " if self.customer_name else ""
                 return self._reply(
                     f"Perfect, {name_part}our specialist will contact you "
-                    f"at your preferred time on this same number. Thank you "
+                    f"{callback_time} on this same number. Thank you "
                     f"for your time, have a great day!"
                 )
 
@@ -1541,8 +1677,8 @@ class ChatSession:
 
             name_part = f"{self.customer_name}, " if self.customer_name else ""
             return self._reply(
-                f"Perfect, {name_part}our specialist will contact you at "
-                f"your preferred time on this same number. Thank you for "
+                f"Perfect, {name_part}our specialist will contact you "
+                f"{callback_time} on this same number. Thank you for "
                 f"your time, have a great day!"
             )
 

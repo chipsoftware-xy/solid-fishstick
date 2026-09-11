@@ -46,6 +46,9 @@ from app.knowledge_base import KnowledgeBase
 from app.call_finalizer import finalize_call
 from app.call_storage import mark_done_by_phone, mark_failed_by_phone, get_next_pending, set_queue_status, save_call, init_db
 
+import app.llm.chat_session as chat_session
+import app.call_storage as call_storage
+
 VAD_SETTINGS = {
     "vad_aggressiveness": 2,
     "vad_frame_ms": 30,
@@ -130,6 +133,22 @@ _warmup_audio = np.zeros(16000, dtype=np.float32)  # 1s of silence at 16kHz
 stt.transcribe_array(_warmup_audio, duration_s=1.0)   # warms the "small" tier
 stt.transcribe_array(_warmup_audio, duration_s=3.0)   # warms the "base" tier
 print("STT models warmed up.")
+
+# Confirmed via direct recorded-audio review of a real call: the
+# silent window between the customer finishing speaking and Spark's
+# first response is entirely unmasked — the existing stall filler only
+# ever covers LLM generation time, not the STT window sitting in front
+# of it (1.3-6+ seconds observed on real phone audio), which is what
+# actually produced the "not listening"/"writing it down" impression.
+# Pre-synthesized once here (not per-turn) so playing it costs nothing
+# but the send itself - real people backchannel ("mm-hmm", "okay")
+# constantly while listening, so this mirrors real conversation rather
+# than just masking a technical delay.
+print("Pre-synthesizing acknowledgment sound...")
+_ack_pcm_bytes, _ack_native_rate = tts.synthesize_to_pcm("Okay.")
+ACKNOWLEDGMENT_PCM_8K = resample_pcm16(_ack_pcm_bytes, _ack_native_rate, EXOTEL_SAMPLE_RATE).tobytes()
+ACKNOWLEDGMENT_SECONDS = len(ACKNOWLEDGMENT_PCM_8K) / 2 / EXOTEL_SAMPLE_RATE
+print(f"Acknowledgment sound ready ({ACKNOWLEDGMENT_SECONDS:.2f}s).")
 
 print("Shared resources ready.")
 
@@ -257,6 +276,7 @@ async def handle(ws):
     call_sample_rate = 8000
     call_errored = False
     _first_turn_was_slow = False
+    _consecutive_gratitude_discards = 0
 
     # Set to a future timestamp every time Spark finishes speaking
     # (opening message AND every run_turn reply) — while time.time() is
@@ -487,6 +507,18 @@ async def handle(ws):
                 turn_audio = detector.add_media_payload(payload)
 
                 if turn_audio is not None:
+                    # Sent immediately, before STT even starts — this
+                    # is the exact moment a genuine speech turn was
+                    # confirmed (already past add_media_payload's own
+                    # min-speech-length and min-RMS false-trigger
+                    # filters), so this won't fire on background noise
+                    # VAD mistakenly triggered on. Covers the silent
+                    # STT window the existing stall filler never
+                    # reached — see the pre-synthesis comment at
+                    # startup for the full reasoning.
+                    await send_pcm_as_media(ws, stream_sid, ACKNOWLEDGMENT_PCM_8K)
+                    mute_until = time.time() + MUTE_GRACE_SECONDS + (ACKNOWLEDGMENT_SECONDS * 0.15)
+
                     duration_s = len(turn_audio) / 2 / call_sample_rate
                     padding_s = (VAD_SETTINGS["vad_preroll_ms"] + VAD_SETTINGS["vad_silence_ms"]) / 1000
                     estimated_speech_s = max(0.0, duration_s - padding_s)
@@ -630,9 +662,33 @@ async def handle(ws):
         # unconditionally too). chat is None if the connection dropped
         # before the "start" event ever arrived — nothing to save yet.
         if chat is not None:
-            _cleanup_start = time.perf_counter()
-            finalize_call(chat, phone=customer_phone)
-            print(f"[TIMING-DEBUG] finalize_call() took {time.perf_counter() - _cleanup_start:.3f}s")
+            # simulate_exotel_call.py connects to this exact, real
+            # server (that's the whole point of it) - it always
+            # identifies itself with this same, fixed fake number,
+            # which no real caller would ever have. Detected here so
+            # simulator runs don't pollute the real call_queue/dataset
+            # the same way local-mic tests were fixed to not do
+            # earlier - redirected for just this one finalize_call()
+            # call, restored immediately after, not left changed for
+            # the rest of this process's real, ongoing calls.
+            is_simulated_call = customer_phone == "+919999999999"
+            if is_simulated_call:
+                _original_db_path = call_storage.DB_PATH
+                _original_transcript_dir = chat_session.TRANSCRIPT_DIR
+                call_storage.DB_PATH = Path("data/spark_local_test.db")
+                call_storage.TRANSCRIPT_DIR = Path("transcripts_local_test")
+                chat_session.TRANSCRIPT_DIR = Path("transcripts_local_test")
+                chat_session.TRANSCRIPT_DIR.mkdir(exist_ok=True)
+
+            try:
+                _cleanup_start = time.perf_counter()
+                finalize_call(chat, phone=customer_phone)
+                print(f"[TIMING-DEBUG] finalize_call() took {time.perf_counter() - _cleanup_start:.3f}s")
+            finally:
+                if is_simulated_call:
+                    call_storage.DB_PATH = _original_db_path
+                    call_storage.TRANSCRIPT_DIR = _original_transcript_dir
+                    chat_session.TRANSCRIPT_DIR = _original_transcript_dir
 
             # Counts toward the restart threshold below only if this
             # was a genuine, real conversation — not a missed_busy
@@ -666,13 +722,14 @@ async def handle(ws):
                         f"number shown in Call Queue."
                     )
 
-            # Only continue the chain if THIS call was itself part of
-            # an active batch — a one-off manual "Call" click from
-            # Call Queue's per-row button must NOT cascade into dialing
-            # the rest of the queue.
-            if BATCH_ACTIVE_PATH.exists():
-                await _continue_batch()
-
+            # Restart decision happens BEFORE continuing the batch,
+            # deliberately — dialing a fresh customer and then
+            # immediately tearing down the server for a full model
+            # reload would connect them to a server that's disappearing
+            # or already gone. If a restart is needed, this cycle skips
+            # dialing entirely and leaves the queue as-is; the freshly
+            # restarted process resumes it on startup (see main()).
+            #
             # Confirmed via direct measurement (gc.collect() froze at
             # 0.0 MB freed across two real calls, despite genuinely
             # collecting hundreds of garbage objects each time): this
@@ -688,7 +745,9 @@ async def handle(ws):
             # process restart is the only reliable way to actually
             # return this memory - there's no Windows equivalent to
             # Linux's malloc_trim() that would reclaim it without one.
-            if _first_turn_was_slow or _completed_call_count >= MAX_CALLS_BEFORE_RESTART:
+            needs_restart = _first_turn_was_slow or _completed_call_count >= MAX_CALLS_BEFORE_RESTART
+
+            if needs_restart:
                 reason = (
                     "turn 1's prompt-eval crossed the threshold this call"
                     if _first_turn_was_slow
@@ -698,9 +757,16 @@ async def handle(ws):
                     f"[RESTART] Restarting the process ({reason}) — releasing "
                     f"accumulated memory before it affects the next call's "
                     f"latency. The launcher script should relaunch "
-                    f"automatically."
+                    f"automatically. Skipping this cycle's dial — the "
+                    f"restarted process will resume the batch on startup."
                 )
                 _shutdown_event.set()
+            elif BATCH_ACTIVE_PATH.exists():
+                # Only continue the chain if THIS call was itself part
+                # of an active batch — a one-off manual "Call" click
+                # from Call Queue's per-row button must NOT cascade
+                # into dialing the rest of the queue.
+                await _continue_batch()
 
 
 async def main():
@@ -710,6 +776,18 @@ async def main():
     print("Two-way pipeline test server listening on ws://0.0.0.0:5001")
     print("Run 'ngrok http 5001' (or cloudflared) in another terminal to expose this publicly.")
     async with websockets.serve(handle, "0.0.0.0", 5001):
+        # If a batch was still active when this process restarted (the
+        # normal, expected reason for a restart mid-batch — see the
+        # restart-decision comment above), nothing else would ever
+        # resume it: _continue_batch() only ever gets triggered by "a
+        # call just ended", and after a restart there's no such event
+        # to trigger it. Checked here, after the server is already
+        # listening, so it's actually ready for the connection Exotel
+        # makes back once place_call() dials.
+        if BATCH_ACTIVE_PATH.exists():
+            print("[RESTART] A batch was active before this restart — resuming it now.")
+            await _continue_batch()
+
         await _shutdown_event.wait()
     print("[RESTART] Server closed. Exiting process for the launcher to relaunch.")
 

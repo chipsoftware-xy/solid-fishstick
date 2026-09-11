@@ -1,0 +1,113 @@
+{
+  "call_id": "aef0c5f58e0d4e1ab05df7ded398a2b3",
+  "started": "2026-09-11T20:41:44.601452Z",
+  "customer_name": null,
+  "customer_organization": null,
+  "transcript": [
+    {
+      "role": "assistant",
+      "content": "Hi, this is Spark from Smart Chip Tree. For a limited time, we offer free onsite service for DataCard, HID Fargo, Zebra, and IDP printers \u2014 both DTC and Retransfer types \u2014 by our factory-trained engineer. Do you have a quick minute?",
+      "timestamp": "2026-09-11T20:41:44.601452Z"
+    },
+    {
+      "role": "user",
+      "content": "Yeah, sure, go ahead.",
+      "timestamp": "2026-09-11T20:41:58.638382Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Great. Would you like to know about a specific product or service, or would you prefer I connect you with a specialist for a callback?",
+      "timestamp": "2026-09-11T20:41:58.640490Z"
+    },
+    {
+      "role": "user",
+      "content": "Would you be able to provide services in Kashmir?",
+      "timestamp": "2026-09-11T20:42:11.748467Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me think about that for a second.",
+      "timestamp": "2026-09-11T20:42:14.476894Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Yes, we offer PAN India service, including support in Kashmir. Let\u2019s connect you with a specialist to discuss your specific needs.",
+      "timestamp": "2026-09-11T20:42:16.183388Z"
+    },
+    {
+      "role": "user",
+      "content": "We provide the exact amount of money, where do you operate from, where do you have your offices and all?",
+      "timestamp": "2026-09-11T20:42:26.556596Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me think about that for a second.",
+      "timestamp": "2026-09-11T20:42:29.109105Z"
+    },
+    {
+      "role": "assistant",
+      "content": "We operate across India, with offices in Delhi, Noida, Bangalore and Pune, and headquarters in Delhi. Would you like me to connect you with a specialist to discuss your requirements?",
+      "timestamp": "2026-09-11T20:42:32.488779Z"
+    },
+    {
+      "role": "user",
+      "content": "We need like simple PVC cards and lanyards and also the printing. I knew mentioned that the printing services are free, is that right?",
+      "timestamp": "2026-09-11T20:42:48.211169Z"
+    },
+    {
+      "role": "assistant",
+      "content": "One moment please.",
+      "timestamp": "2026-09-11T20:42:50.777373Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Yes, that\u2019s correct \u2013 our current offer includes on-site printer support and card printing. Let\u2019s connect you with a specialist to confirm the details.",
+      "timestamp": "2026-09-11T20:42:53.757893Z"
+    },
+    {
+      "role": "user",
+      "content": "We are an Arunachal person.",
+      "timestamp": "2026-09-11T20:43:02.041642Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Okay, let me see.",
+      "timestamp": "2026-09-11T20:43:04.613736Z"
+    },
+    {
+      "role": "assistant",
+      "content": "That\u2019s great to hear. Our PAN India service extends to Arunachal Pradesh. Would you like me to connect you with a specialist?",
+      "timestamp": "2026-09-11T20:43:07.085583Z"
+    },
+    {
+      "role": "user",
+      "content": "My name is Risharti.",
+      "timestamp": "2026-09-11T20:43:23.076234Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Just a moment, let me check that for you.",
+      "timestamp": "2026-09-11T20:43:25.650960Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Okay, Risharti. We can certainly assist you with your card and lanyard needs. Would you like me to connect you with a specialist?",
+      "timestamp": "2026-09-11T20:43:28.567290Z"
+    },
+    {
+      "role": "user",
+      "content": "I am calling from MOD.",
+      "timestamp": "2026-09-11T20:43:40.864766Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me think about that for a second.",
+      "timestamp": "2026-09-11T20:43:43.477792Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Thank you for that information, Risharti. Let\u2019s see how we can help you with your ID card printing. Would you like me to connect you with a specialist?",
+      "timestamp": "2026-09-11T20:43:46.749054Z"
+    }
+  ]
+}
