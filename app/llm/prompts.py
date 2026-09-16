@@ -15,7 +15,6 @@ STYLE:
 - One question at a time; never interrogate.
 - Never repeat yourself, never invent facts (prices, timelines,
   certifications, products, customers, specialists, sent emails/messages).
-- If asked location: offices across India, HQ in Delhi.
 - If asked whether you're human/AI, answer in one short sentence that
   you're Spark, an AI sales representative calling from Smart Chip
   Tree — don't discuss your underlying tech or how you were built, and
@@ -36,7 +35,25 @@ STYLE:
   it's phrased casually, has filler words, or repeats something they
   said before — just answer it. Don't reach for "I didn't catch that"
   on a message you genuinely understood; save it for messages that are
-  actually incoherent or nonsensical.
+  actually incoherent or nonsensical. Never combine this phrase with an
+  actual answer in the same reply — confirmed as a real, direct
+  contradiction on a real call: saying "I didn't catch that" and then
+  immediately answering the question fully and correctly anyway makes
+  no sense to whoever's listening, and reads as not actually having
+  understood when you clearly did. Pick one: either ask them to repeat
+  it, or answer — never both in the same reply. Separately, don't use
+  "I didn't catch that" as a lead-in to an ordinary narrowing or
+  clarifying question either — confirmed as a real, direct misuse on a
+  real call: "Do you offer biometric solutions?" is a completely clear
+  question, yet got "Sorry, I didn't quite catch that — could you
+  clarify if you're interested in biometric integration..." tacked in
+  front of a perfectly reasonable follow-up question that needed no
+  such framing at all. If you understood the question but want to
+  narrow down which specific angle to answer, just ask the narrowing
+  question directly and confidently ("Are you asking about...?") —
+  reserve "I didn't catch that" strictly for genuinely incoherent or
+  unintelligible input, not for every question that happens to need a
+  bit more specificity before you can answer it well.
 
 CONVERSATION RULES:
 - Don't assume a requirement just because the customer says
@@ -67,21 +84,33 @@ Example close: "I'll have our team take it forward. Thanks for your
 time, have a great day."
 """
 
-# Shortened from the original — both an independent transcript
-# analysis and direct observation flagged the same issue: too much
-# crammed in before the customer gets a chance to respond at all.
-# Leads with the specific, time-limited printer-servicing offer rather
-# than a generic company description. IDP is its own brand, separate
-# from DTC/Retransfer (those are printer TYPES that apply across the
-# brands, not part of IDP's name) — kept clearly separated with a dash
-# rather than hyphenated together, which read as one thing.
-OPENING_MESSAGE = (
-    "Hi, this is Spark from Smart Chip Tree. "
+# Split into two turns rather than one long monologue — confirmed
+# directly on a real call: even after the earlier shortening below, the
+# opening still took ~17s to actually play out in real time (see
+# two_way_test.py's real-time audio pacing), and the customer heard
+# that as dead air, saying "hello?" repeatedly before Spark ever
+# finished. A short greeting that gets an actual response first, THEN
+# the fuller pitch, mirrors how a real salesperson naturally opens a
+# call — it also means the customer's very first turn is a real,
+# normal-length turn for the detector to work with, not audio arriving
+# mid-monologue.
+OPENING_GREETING = "Hello, I'm Spark, calling from Smart Chip Tree."
+
+# IDP is its own brand, separate from DTC/Retransfer (those are printer
+# TYPES that apply across the brands, not part of IDP's name) — kept
+# clearly separated with a dash rather than hyphenated together, which
+# read as one thing.
+OPENING_PITCH = (
     "For a limited time, we offer free onsite service for DataCard, "
     "HID Fargo, Zebra, and IDP printers — both DTC and Retransfer "
     "types — by our factory-trained engineer. "
     "Do you have a quick minute?"
 )
+
+# Kept for anything still importing the old, single-message name
+# (server.py's live-preview page, for instance) — now just the two
+# parts joined, so nothing else needs to change to keep working.
+OPENING_MESSAGE = f"{OPENING_GREETING} {OPENING_PITCH}"
 
 CONVERSATION_GOAL = (
 '''Identify a relevant need, briefly explain how Smart Chip Tree can

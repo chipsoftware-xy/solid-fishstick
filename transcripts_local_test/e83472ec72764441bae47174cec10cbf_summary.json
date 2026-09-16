@@ -1,0 +1,53 @@
+{
+  "call_id": "e83472ec72764441bae47174cec10cbf",
+  "started": "2026-09-14T06:26:11.458533Z",
+  "customer_name": null,
+  "customer_organization": null,
+  "transcript": [
+    {
+      "role": "assistant",
+      "content": "Hello, I'm Spark, calling from Smart Chip Tree.",
+      "timestamp": "2026-09-14T06:26:11.458533Z"
+    },
+    {
+      "role": "user",
+      "content": "Yeah, yeah, yeah, sure, go ahead.",
+      "timestamp": "2026-09-14T06:26:37.734341Z"
+    },
+    {
+      "role": "assistant",
+      "content": "For a limited time, we offer free onsite service for DataCard, HID Fargo, Zebra, and IDP printers \u2014 both DTC and Retransfer types \u2014 by our factory-trained engineer. Do you have a quick minute?",
+      "timestamp": "2026-09-14T06:26:37.737877Z"
+    },
+    {
+      "role": "user",
+      "content": "Hello, the printer, the printer, go.  I see, where are you based in exactly? Where do you operate from? Where do you have your offices and all?",
+      "timestamp": "2026-09-14T06:27:00.177258Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me think about that for a second.",
+      "timestamp": "2026-09-14T06:27:02.764290Z"
+    },
+    {
+      "role": "user",
+      "content": "No, no, but like, we are already using an Amir and all,  You are an AI model, like are you AI or are you a person?  - My name is...",
+      "timestamp": "2026-09-14T06:27:32.759447Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Just a moment, let me check that for you.",
+      "timestamp": "2026-09-14T06:27:35.317587Z"
+    },
+    {
+      "role": "user",
+      "content": "I'm calling from MOJ.  You can call me tomorrow at around 4pm, I think.",
+      "timestamp": "2026-09-14T06:28:00.303256Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me think about that for a second.",
+      "timestamp": "2026-09-14T06:28:02.879409Z"
+    }
+  ]
+}

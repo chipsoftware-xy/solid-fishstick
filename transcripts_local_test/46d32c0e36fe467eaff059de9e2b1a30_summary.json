@@ -1,0 +1,48 @@
+{
+  "call_id": "46d32c0e36fe467eaff059de9e2b1a30",
+  "started": "2026-09-14T03:41:12.140746Z",
+  "customer_name": null,
+  "customer_organization": null,
+  "transcript": [
+    {
+      "role": "assistant",
+      "content": "Hello, I'm Spark, calling from Smart Chip Tree.",
+      "timestamp": "2026-09-14T03:41:12.140746Z"
+    },
+    {
+      "role": "user",
+      "content": "Yeah, yeah, yeah sure, go ahead.",
+      "timestamp": "2026-09-14T03:41:30.230398Z"
+    },
+    {
+      "role": "assistant",
+      "content": "For a limited time, we offer free onsite service for DataCard, HID Fargo, Zebra, and IDP printers \u2014 both DTC and Retransfer types \u2014 by our factory-trained engineer. Do you have a quick minute?",
+      "timestamp": "2026-09-14T03:41:30.230398Z"
+    },
+    {
+      "role": "user",
+      "content": "Okay, but can you deliver to Kashmir and all?",
+      "timestamp": "2026-09-14T03:41:58.531008Z"
+    },
+    {
+      "role": "assistant",
+      "content": "One moment please.",
+      "timestamp": "2026-09-14T03:42:01.261312Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Yes, we provide services across India, including Kashmir. Let\u2019s connect you with a specialist to discuss your specific needs.",
+      "timestamp": "2026-09-14T03:42:03.238173Z"
+    },
+    {
+      "role": "user",
+      "content": "Okay, but can you deliver to Kashmir and all?",
+      "timestamp": "2026-09-14T03:42:10.310767Z"
+    },
+    {
+      "role": "assistant",
+      "content": "We certainly can. Would you like me to connect you with a specialist to discuss your employee ID requirements?",
+      "timestamp": "2026-09-14T03:42:13.056879Z"
+    }
+  ]
+}

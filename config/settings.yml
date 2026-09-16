@@ -7,11 +7,28 @@ llm:
   keep_alive: -1
   stall_threshold_seconds: 2.5
   stall_phrase: Just a moment, let me check that for you.
+  deepinfra:
+    api_key: YBaVB3PbbrMbKcNG38qrHet7giAicPEP
+    model: google/gemma-3-4b-it
 stt:
   model: base
-  low_confidence_threshold: -1.2
+  low_confidence_threshold: -1.1
+  deepinfra:
+    api_key: TmmTU7snLfe07GX2ZAJYWwEfnDdPXpQJ
+    model: openai/whisper-large-v3-turbo
+
 tts:
   voice: en_IN-dataset3Dljspeech-epochs%3D1089
+  # Piper's own default is 1.0 (normal speed). Lower = faster, without
+  # the pitch distortion a naive playback-speed hack would cause. Set
+  # here after a real customer heard the ~16s opening as dead air and
+  # said "hello?" repeatedly before Spark actually finished — a real,
+  # felt cost of real-time audio pacing (see two_way_test.py's
+  # send_pcm_as_media), not just a number in a log. 0.88 is a starting
+  # point (~12% faster) — listen to a real call and adjust; going much
+  # below ~0.8 risks sounding rushed or artificial for this voice.
+  length_scale: 0.88
+ 
 audio:
   sample_rate: 16000
   target_peak: 26000

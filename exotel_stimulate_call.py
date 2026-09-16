@@ -37,6 +37,31 @@ USAGE:
                                                       # sending near-
                                                       # silent audio and
                                                       # doing nothing
+    python simulate_exotel_call.py --barge-in-test   # tests interruption
+                                                      # detection against
+                                                      # a REAL, later
+                                                      # reply (not the
+                                                      # short opening) —
+                                                      # goes through
+                                                      # setup_clips
+                                                      # first, then
+                                                      # sends
+                                                      # trigger_clip
+                                                      # (should prompt a
+                                                      # long reply), then
+                                                      # interrupts mid-
+                                                      # speech with
+                                                      # interruption.wav.
+                                                      # Needs audio/input/
+                                                      # turn_biometric.wav
+                                                      # (a real product
+                                                      # question) and
+                                                      # audio/input/
+                                                      # interruption.wav
+                                                      # (something clearly
+                                                      # different, e.g.
+                                                      # "Wait, I have a
+                                                      # question")
 """
 import asyncio
 import base64
@@ -337,8 +362,127 @@ async def run_silence_test():
     print("\nSilence test finished - check the two_way_test.py terminal.")
 
 
+async def run_barge_in_test(setup_clips=None, trigger_clip="audio/input/test1.3.wav", interrupt_delay=3.0, interruption_clip="audio/input/test1.3.wav"):
+    """
+    Tests barge-in specifically, against a REAL, later reply — not the
+    opening greeting. Confirmed directly as the wrong target for this:
+    the opening is now only ~2-3s ("Hello, I'm Spark, calling from
+    Smart Chip Tree"), and a 3s interrupt_delay meant the greeting had
+    already finished by the time the interruption clip was sent, so it
+    landed in the normal post-greeting window instead of overlapping
+    Spark's actual speech at all — no genuine interruption was ever
+    attempted.
+
+    Goes through setup_clips first (real turns, waiting for each reply
+    normally, same as run_call_script) to get past the short opening
+    entirely. Then sends trigger_clip — pick something that prompts a
+    genuinely long, multi-sentence reply (a real product question
+    works well) — and, WHILE that reply is still actively playing
+    (deliberately not waiting for it to finish), sends interruption_clip.
+
+    Record interruption_clip saying something clearly, obviously
+    different from whatever trigger_clip's reply will say — e.g. "Wait,
+    I have a question" — so it's unambiguously not an echo. Run it
+    through simulate_phone_audio.py first, same as any other clip.
+
+    Reports the real, measured latency from sending the interruption to
+    Spark's own audio stream going quiet again — judge the ~2s latency
+    budget against this number directly. Since this hits the real
+    server (same DeepInfra STT call the live pipeline uses), a slow
+    result here on clean, local audio is an honest signal that real
+    degraded phone audio will be slower still, not a testing artifact.
+    """
+    if setup_clips is None:
+        setup_clips = ["audio/input/test2.wav", "audio/input/test3.wav"]
+
+    print(f"Connecting to {SERVER_URL} ...")
+    async with websockets.connect(SERVER_URL) as ws:
+        await ws.send(json.dumps({"event": "connected"}))
+        stream_sid = "SIMULATED_BARGEIN_" + str(int(time.time()))
+        await ws.send(json.dumps({
+            "event": "start",
+            "start": {
+                "stream_sid": stream_sid,
+                "from": FAKE_PHONE_NUMBER,
+                "media_format": {
+                    "encoding": "base64",
+                    "sample_rate": str(EXOTEL_SAMPLE_RATE),
+                    "bit_rate": "128kbps",
+                },
+            },
+        }))
+
+        print(f"[{time.strftime('%H:%M:%S')}] Waiting for Spark's opening message...")
+        await wait_for_spark_to_finish_speaking(ws)
+
+        for i, clip_path in enumerate(setup_clips, 1):
+            print(f"\n[{time.strftime('%H:%M:%S')}] --- Setup turn {i}: sending {clip_path} ---")
+            try:
+                pcm_bytes = load_wav_as_pcm16_8k(clip_path)
+            except FileNotFoundError:
+                print(f"  ERROR: {clip_path} not found — check setup_clips paths.")
+                return
+            await send_audio_as_media_events(ws, stream_sid, pcm_bytes)
+            await send_silence(ws, stream_sid, seconds=1.5)
+            # Generous max_wait here — a real reply can take ~10-20s
+            # to fully play at real-time pacing; this must be long
+            # enough to genuinely let it finish, not time out mid-reply
+            # the way the previous version's fixed 15s did.
+            await wait_for_spark_to_finish_speaking(ws, max_wait=30)
+
+        print(f"\n[{time.strftime('%H:%M:%S')}] --- Trigger turn: sending {trigger_clip} (should prompt a long reply) ---")
+        try:
+            trigger_pcm = load_wav_as_pcm16_8k(trigger_clip)
+        except FileNotFoundError:
+            print(
+                f"  ERROR: {trigger_clip} not found — record a clip asking "
+                f"a real product question, something that should prompt a "
+                f"genuinely long, multi-sentence reply to interrupt."
+            )
+            return
+        try:
+            interruption_pcm = load_wav_as_pcm16_8k(interruption_clip)
+        except FileNotFoundError:
+            print(
+                f"  ERROR: {interruption_clip} not found — record a short "
+                f"clip saying something clearly DIFFERENT from whatever "
+                f"the trigger reply will say (e.g. \"Wait, I have a "
+                f"question\")."
+            )
+            return
+
+        await send_audio_as_media_events(ws, stream_sid, trigger_pcm)
+        await send_silence(ws, stream_sid, seconds=1.5)
+
+        print(
+            f"[{time.strftime('%H:%M:%S')}] Waiting {interrupt_delay}s while "
+            f"Spark's reply plays, then interrupting mid-speech "
+            f"(deliberately NOT waiting for it to finish first)..."
+        )
+        await asyncio.sleep(interrupt_delay)
+
+        interrupt_sent_at = time.time()
+        print(f"[{time.strftime('%H:%M:%S')}] Sending interruption clip NOW — Spark should still be mid-reply.")
+        await send_audio_as_media_events(ws, stream_sid, interruption_pcm)
+        await send_silence(ws, stream_sid, seconds=1.5)
+
+        print("Watching for Spark to stop/respond — check the two_way_test.py terminal for a [BARGE-IN] log line to confirm it actually fired, not just that Spark eventually went quiet.")
+        await wait_for_spark_to_finish_speaking(ws, max_wait=30)
+        elapsed = time.time() - interrupt_sent_at
+
+        print(f"\nTotal time from sending the interruption to Spark finishing its response: {elapsed:.2f}s")
+        print("This is the real number to judge the ~2s latency budget against.")
+
+        await ws.send(json.dumps({"event": "stop"}))
+        await asyncio.sleep(1)
+
+    print("\nBarge-in test finished — check the two_way_test.py terminal for full logs.")
+
+
 if __name__ == "__main__":
     if "--silence-test" in sys.argv:
         asyncio.run(run_silence_test())
+    elif "--barge-in-test" in sys.argv:
+        asyncio.run(run_barge_in_test())
     else:
         asyncio.run(run_call_script(CALL_SCRIPT))

@@ -1,0 +1,33 @@
+{
+  "call_id": "5053343fd3e4428a92280116592d7bdc",
+  "started": "2026-09-14T05:03:20.923430Z",
+  "customer_name": null,
+  "customer_organization": null,
+  "transcript": [
+    {
+      "role": "assistant",
+      "content": "Hello, I'm Spark, calling from Smart Chip Tree.",
+      "timestamp": "2026-09-14T05:03:20.923430Z"
+    },
+    {
+      "role": "user",
+      "content": "Yeah, yeah, yeah sure, go ahead.  - I.",
+      "timestamp": "2026-09-14T05:03:47.905281Z"
+    },
+    {
+      "role": "assistant",
+      "content": "For a limited time, we offer free onsite service for DataCard, HID Fargo, Zebra, and IDP printers \u2014 both DTC and Retransfer types \u2014 by our factory-trained engineer. Do you have a quick minute?",
+      "timestamp": "2026-09-14T05:03:47.905281Z"
+    },
+    {
+      "role": "user",
+      "content": "Hello, data, and all.  I see, where are you based in exactly? Where do you operate from? Where do you have your offices and all?",
+      "timestamp": "2026-09-14T05:04:03.388270Z"
+    },
+    {
+      "role": "assistant",
+      "content": "I\u2019m Spark, an AI sales representative calling from Smart Chip Tree. We have offices in Delhi, Noida, Bangalore and Pune, with our headquarters in Delhi. Are you exploring options for an employee ID program?",
+      "timestamp": "2026-09-14T05:04:08.772983Z"
+    }
+  ]
+}

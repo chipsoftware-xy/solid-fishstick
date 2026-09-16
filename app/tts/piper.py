@@ -4,6 +4,7 @@ import time
 import wave
 
 from piper.voice import PiperVoice
+from piper import SynthesisConfig
 
 from app.config import settings
 from app.utils.text_cleaner import clean_for_tts
@@ -53,7 +54,11 @@ def _prepare_text(text: str) -> str:
     # Same category as RFID — this voice model reads "AI" as a single
     # slurred "ayi" sound instead of two distinct letters. Word-boundary
     # matched so it doesn't touch "AI" appearing inside another word.
-    text = re.sub(r"\bAI\b", "A I", text)
+    # Confirmed directly on a real call: the space-separated "A I"
+    # version still came out as "ayi" — switched to periods, a more
+    # standard signal for espeak-based engines to spell out an
+    # initialism letter-by-letter rather than blend it into one sound.
+    text = re.sub(r"\bAI\b", "A.I.", text)
     # Opposite problem from RFID: "PAN" here is a real word ("pan-India"
     # = across India), not an acronym — but Piper/espeak reads short
     # all-caps tokens as spelled-out letters by default ("P A N India").
@@ -70,14 +75,11 @@ def _prepare_text(text: str) -> str:
     # test calls with zero reported pronunciation issues, so there's
     # real evidence behind this choice rather than another guess.
     text = _replace_preserving_case(r"\bgreat\b", "perfect", text)
-    # Same category of issue reported for "okay" — replacing with
-    # "alright" as a first attempt for the same reason.
-    text = _replace_preserving_case(r"\bokay\b", "alright", text)
     return text
 
 
 class TTS:
-    def __init__(self, voice_name: str = None):
+    def __init__(self, voice_name: str = None, length_scale: float = None):
         voice_name = voice_name or settings["tts"]["voice"]
         self.model_path = VOICES_DIR / f"{voice_name}.onnx"
         config_path = VOICES_DIR / f"{voice_name}.onnx.json"
@@ -97,6 +99,20 @@ class TTS:
         end = time.perf_counter()
         print(f"Piper loaded in {end - start:.2f}s")
 
+        # Piper's own default is 1.0 (normal speed); lower values speak
+        # faster WITHOUT the pitch distortion a naive playback-speed
+        # hack would cause, since this is a real parameter of the
+        # neural synthesis itself, not post-hoc audio resampling.
+        # Confirmed directly: a real customer heard the ~16s opening as
+        # dead air and said "hello?" repeatedly before Spark actually
+        # finished — a real, felt cost of Stage 1's real-time pacing
+        # (see two_way_test.py), not just a number in a log. Falls back
+        # to settings.yml's tts.length_scale, defaulting to 1.0 (Piper's
+        # own default, i.e. no change) if that key isn't present, so
+        # this is opt-in rather than silently changing existing setups.
+        scale = length_scale if length_scale is not None else settings["tts"].get("length_scale", 1.0)
+        self.syn_config = SynthesisConfig(length_scale=scale)
+
     def speak(self, text: str, output_path: str):
         start = time.perf_counter()
 
@@ -109,7 +125,7 @@ class TTS:
         text = clean_for_tts(text)
         text = _prepare_text(text)
 
-        chunks = list(self.voice.synthesize(text))
+        chunks = list(self.voice.synthesize(text, syn_config=self.syn_config))
 
         if not chunks:
             raise RuntimeError("No audio generated.")
@@ -137,7 +153,7 @@ class TTS:
         text = clean_for_tts(text)
         text = _prepare_text(text)
 
-        chunks = list(self.voice.synthesize(text))
+        chunks = list(self.voice.synthesize(text, syn_config=self.syn_config))
         if not chunks:
             raise RuntimeError("No audio generated.")
 

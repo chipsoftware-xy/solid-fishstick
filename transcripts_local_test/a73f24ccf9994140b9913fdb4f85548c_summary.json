@@ -1,0 +1,28 @@
+{
+  "call_id": "a73f24ccf9994140b9913fdb4f85548c",
+  "started": "2026-09-14T04:17:07.784994Z",
+  "customer_name": null,
+  "customer_organization": null,
+  "transcript": [
+    {
+      "role": "assistant",
+      "content": "Hello, I'm Spark, calling from Smart Chip Tree.",
+      "timestamp": "2026-09-14T04:17:07.784994Z"
+    },
+    {
+      "role": "user",
+      "content": "Yeah, yeah, yeah sure, go ahead.",
+      "timestamp": "2026-09-14T04:17:25.711551Z"
+    },
+    {
+      "role": "assistant",
+      "content": "For a limited time, we offer free onsite service for DataCard, HID Fargo, Zebra, and IDP printers \u2014 both DTC and Retransfer types \u2014 by our factory-trained engineer. Do you have a quick minute?",
+      "timestamp": "2026-09-14T04:17:25.713568Z"
+    },
+    {
+      "role": "user",
+      "content": "No, no, but like, we are already using another printer though,",
+      "timestamp": "2026-09-14T04:18:04.716260Z"
+    }
+  ]
+}

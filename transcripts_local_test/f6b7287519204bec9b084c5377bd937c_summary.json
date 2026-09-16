@@ -1,0 +1,13 @@
+{
+  "call_id": "f6b7287519204bec9b084c5377bd937c",
+  "started": "2026-09-14T03:37:47.071925Z",
+  "customer_name": null,
+  "customer_organization": null,
+  "transcript": [
+    {
+      "role": "assistant",
+      "content": "Hello, I'm Spark, calling from Smart Chip Tree.",
+      "timestamp": "2026-09-14T03:37:47.071925Z"
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import chromadb
 from sentence_transformers import SentenceTransformer
 
@@ -62,30 +63,53 @@ class KnowledgeBase:
             f"Knowledge base ready ({len(chunks)} chunks)."
         )
 
-    def _chunk_text(self, text, max_chars=800):
-        paragraphs = text.split("\n\n")
+    def _chunk_text(self, text, max_chars=1500):
+        """
+        Each "## " section becomes its own chunk, unconditionally — no
+        grouping of multiple sections into one chunk at all.
+
+        Confirmed as a real cause of a content-retrieval miss: an
+        earlier version grouped sections together up to a char limit,
+        which still merged a focused section like "Access control &
+        biometrics" with unrelated neighbors (printers, consumables,
+        etc.), diluting its embedding enough that a narrow query like
+        "biometric identification" didn't score within max_distance —
+        even though the file explicitly does cover biometrics. Keeping
+        every section fully separate removes that dilution entirely
+        rather than just reducing it. This file is small enough that
+        the resulting handful of extra chunks costs nothing meaningful
+        at retrieval time.
+
+        max_chars now only guards against a single section being
+        unexpectedly huge (split at a paragraph boundary in that case,
+        not mid-sentence) — it no longer controls normal chunking at
+        all when sections are reasonably sized, which they are here.
+        """
+        raw_sections = re.split(r"(?=^## )", text, flags=re.MULTILINE)
+        sections = [s.strip() for s in raw_sections if s.strip()]
 
         chunks = []
-        current = ""
-
-        for paragraph in paragraphs:
-
-            paragraph = paragraph.strip()
-
-            if not paragraph:
+        for section in sections:
+            if len(section) <= max_chars:
+                chunks.append(section)
                 continue
-
-            if len(current) + len(paragraph) > max_chars:
-                if current:
-                    chunks.append(current.strip())
-
-                current = paragraph
-
-            else:
-                current += "\n" + paragraph
-
-        if current:
-            chunks.append(current.strip())
+            # Fallback for an unexpectedly long section — split on
+            # paragraph breaks within it rather than dropping this
+            # safeguard entirely.
+            paragraphs = section.split("\n\n")
+            current = ""
+            for paragraph in paragraphs:
+                paragraph = paragraph.strip()
+                if not paragraph:
+                    continue
+                if len(current) + len(paragraph) > max_chars:
+                    if current:
+                        chunks.append(current.strip())
+                    current = paragraph
+                else:
+                    current = f"{current}\n{paragraph}" if current else paragraph
+            if current:
+                chunks.append(current.strip())
 
         return chunks
 

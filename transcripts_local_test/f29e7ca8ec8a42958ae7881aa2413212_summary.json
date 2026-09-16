@@ -1,0 +1,48 @@
+{
+  "call_id": "f29e7ca8ec8a42958ae7881aa2413212",
+  "started": "2026-09-14T05:54:53.636206Z",
+  "customer_name": null,
+  "customer_organization": null,
+  "transcript": [
+    {
+      "role": "assistant",
+      "content": "Hello, I'm Spark, calling from Smart Chip Tree.",
+      "timestamp": "2026-09-14T05:54:53.636206Z"
+    },
+    {
+      "role": "user",
+      "content": "Yeah, yeah, yeah, sure, go ahead.  - I.",
+      "timestamp": "2026-09-14T05:55:18.673721Z"
+    },
+    {
+      "role": "assistant",
+      "content": "For a limited time, we offer free onsite service for DataCard, HID Fargo, Zebra, and IDP printers \u2014 both DTC and Retransfer types \u2014 by our factory-trained engineer. Do you have a quick minute?",
+      "timestamp": "2026-09-14T05:55:18.673721Z"
+    },
+    {
+      "role": "user",
+      "content": "No, but like, we are already using it.  Okay,",
+      "timestamp": "2026-09-14T05:55:55.996241Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me think about that for a second.",
+      "timestamp": "2026-09-14T05:55:58.590546Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Sorry, I didn\u2019t quite catch that. Could you clarify what you\u2019re currently using?",
+      "timestamp": "2026-09-14T05:56:01.478617Z"
+    },
+    {
+      "role": "user",
+      "content": "Can you deliver to Kashmir and all?  Yes, perfect.  I am calling from MOJ.",
+      "timestamp": "2026-09-14T05:56:26.521177Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Yes, we offer PAN India service, including delivery to Kashmir. Would you like to speak with a specialist about your requirements?",
+      "timestamp": "2026-09-14T05:56:29.766057Z"
+    }
+  ]
+}

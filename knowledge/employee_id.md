@@ -13,7 +13,7 @@ production-grade card printing.
 
 ## Access control & biometrics
 Access cards, RFID readers/writers, time & attendance, RFID-based
-identification. Suprema is a technology partner for access control
+identification. We are a technology partner for access control
 and biometric time & attendance.
 
 ## Consumables

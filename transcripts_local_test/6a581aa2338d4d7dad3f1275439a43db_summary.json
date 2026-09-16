@@ -1,0 +1,43 @@
+{
+  "call_id": "6a581aa2338d4d7dad3f1275439a43db",
+  "started": "2026-09-14T05:48:38.798736Z",
+  "customer_name": null,
+  "customer_organization": null,
+  "transcript": [
+    {
+      "role": "assistant",
+      "content": "Hello, I'm Spark, calling from Smart Chip Tree.",
+      "timestamp": "2026-09-14T05:48:38.798736Z"
+    },
+    {
+      "role": "user",
+      "content": "Yeah, yeah, yeah sure, go ahead.  - I.",
+      "timestamp": "2026-09-14T05:49:04.243235Z"
+    },
+    {
+      "role": "assistant",
+      "content": "For a limited time, we offer free onsite service for DataCard, HID Fargo, Zebra, and IDP printers \u2014 both DTC and Retransfer types \u2014 by our factory-trained engineer. Do you have a quick minute?",
+      "timestamp": "2026-09-14T05:49:04.243235Z"
+    },
+    {
+      "role": "user",
+      "content": "Yes, perfect.",
+      "timestamp": "2026-09-14T05:50:01.161835Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Great. Would you like to know about a specific product or service, or would you prefer I connect you with a specialist for a callback?",
+      "timestamp": "2026-09-14T05:50:01.204172Z"
+    },
+    {
+      "role": "user",
+      "content": "I am calling for the tarni, at around 4pm, I think, yeah, that would work.  Yes, perfect.",
+      "timestamp": "2026-09-14T05:50:26.814031Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Great. May I get your name?",
+      "timestamp": "2026-09-14T05:50:31.091423Z"
+    }
+  ]
+}

@@ -49,22 +49,10 @@ class CallTurnDetector:
         self.min_speech_frames = max(1, int(settings.get("vad_min_speech_ms", 300) / self.frame_ms))
         self.max_utterance_frames = max(1, int(settings.get("vad_max_utterance_ms", 20000) / self.frame_ms))
 
-        # Raw energy floor — VAD's per-frame "is this speech" classifier
-        # can false-positive on quiet line noise/static, same as it did
-        # for local mic input. Without this, that noise-classified-as-
-        # speech gets sent straight to Whisper, which sometimes fills
-        # audio with no real signal with hallucinated text (including,
-        # confusingly, text resembling its own initial_prompt) rather
-        # than admitting there was nothing there. Untested starting
-        # point, same as every other VAD number here — watch for real
-        # speech being wrongly discarded (raise it) vs hallucinated
-        # transcripts still appearing (lower it further).
+    
         self.min_rms = settings.get("vad_min_rms", 150)
 
-        # Chunks arriving over the WebSocket won't line up neatly with
-        # VAD frame boundaries — this holds whatever's left over
-        # between calls to add_media_payload() until there's enough
-        # for another full frame.
+      
         self._leftover = b""
         self._reset_state()
 
@@ -73,6 +61,7 @@ class CallTurnDetector:
         self.speech_frames = []
         self.silence_run = 0
         self.speech_frame_count = 0
+        self.last_speech_index = -1
 
     def add_media_payload(self, base64_payload):
         """
@@ -104,6 +93,7 @@ class CallTurnDetector:
                 self.speech_frames = list(self.preroll_buffer)
                 self.speech_frame_count = 1
                 self.silence_run = 0
+                self.last_speech_index = len(self.speech_frames) - 1
             return None
 
         self.speech_frames.append(frame)
@@ -111,6 +101,7 @@ class CallTurnDetector:
 
         if is_speech:
             self.silence_run = 0
+            self.last_speech_index = len(self.speech_frames) - 1
         else:
             self.silence_run += 1
 
@@ -123,17 +114,19 @@ class CallTurnDetector:
 
         collected = self.speech_frames
         collected_frame_count = self.speech_frame_count
+        last_speech_index = self.last_speech_index
         self._reset_state()
 
         if collected_frame_count < self.min_speech_frames:
             # Too short to be real speech — discard, keep listening.
             return None
 
+        padding_frames = max(1, int(300 / self.frame_ms))
+        trim_end = min(len(collected), last_speech_index + 1 + padding_frames)
+        collected = collected[:trim_end]
         audio_bytes = b"".join(collected)
         if _compute_rms(audio_bytes) < self.min_rms:
-            # Long enough in frame-count, but too quiet to be real
-            # speech — VAD likely false-triggered on line noise. Discard
-            # rather than risk Whisper hallucinating on it.
+           
             return None
 
         return audio_bytes

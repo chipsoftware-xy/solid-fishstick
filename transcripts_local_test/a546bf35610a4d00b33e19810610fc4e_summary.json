@@ -1,0 +1,68 @@
+{
+  "call_id": "a546bf35610a4d00b33e19810610fc4e",
+  "started": "2026-09-14T08:57:56.983629Z",
+  "customer_name": null,
+  "customer_organization": null,
+  "transcript": [
+    {
+      "role": "assistant",
+      "content": "Hello, I'm Spark, calling from Smart Chip Tree.",
+      "timestamp": "2026-09-14T08:57:56.983629Z"
+    },
+    {
+      "role": "user",
+      "content": "Hello.  Yeah, yeah, yeah sure, go ahead.  - I.",
+      "timestamp": "2026-09-14T08:58:22.139985Z"
+    },
+    {
+      "role": "assistant",
+      "content": "For a limited time, we offer free onsite service for DataCard, HID Fargo, Zebra, and IDP printers \u2014 both DTC and Retransfer types \u2014 by our factory-trained engineer. Do you have a quick minute?",
+      "timestamp": "2026-09-14T08:58:22.141331Z"
+    },
+    {
+      "role": "user",
+      "content": "I mean, we have a team of 50 people, so we will need simple PVC cards, and lanyards, and also printing. And you mentioned that the printing services are free, is that right?  Okay, but can you deliver to Kashmir and all?",
+      "timestamp": "2026-09-14T08:59:00.098331Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me think about that for a second.",
+      "timestamp": "2026-09-14T08:59:02.764549Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Yes, the printing services are included in the current offer. Let\u2019s connect you with a specialist to discuss delivery to Kashmir.",
+      "timestamp": "2026-09-14T08:59:06.634921Z"
+    },
+    {
+      "role": "user",
+      "content": "Yeah, I have a lot. Okay.  Yes, perfect.",
+      "timestamp": "2026-09-14T08:59:24.115540Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Great. Would you like me to connect you with a specialist to discuss your requirements in more detail?",
+      "timestamp": "2026-09-14T08:59:26.863206Z"
+    },
+    {
+      "role": "user",
+      "content": "- Wait, what?  You can call me tomorrow, at around 4pm, I think, yeah, that would work.",
+      "timestamp": "2026-09-14T08:59:48.488632Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Great. May I get your name?",
+      "timestamp": "2026-09-14T08:59:48.488632Z"
+    },
+    {
+      "role": "user",
+      "content": "Perfect.",
+      "timestamp": "2026-09-14T08:59:50.691459Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Great. Would you like to know about a specific product or service, or would you prefer I connect you with a specialist for a callback?",
+      "timestamp": "2026-09-14T08:59:50.691459Z"
+    }
+  ]
+}

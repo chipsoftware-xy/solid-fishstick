@@ -1,0 +1,63 @@
+{
+  "call_id": "90f1ca87e9724498b35e970a3c02f50e",
+  "started": "2026-09-14T05:23:52.983851Z",
+  "customer_name": null,
+  "customer_organization": null,
+  "transcript": [
+    {
+      "role": "assistant",
+      "content": "Hello, I'm Spark, calling from Smart Chip Tree.",
+      "timestamp": "2026-09-14T05:23:52.983851Z"
+    },
+    {
+      "role": "user",
+      "content": "Yeah, yeah, yeah, yeah sure, go ahead.",
+      "timestamp": "2026-09-14T05:24:21.256152Z"
+    },
+    {
+      "role": "assistant",
+      "content": "For a limited time, we offer free onsite service for DataCard, HID Fargo, Zebra, and IDP printers \u2014 both DTC and Retransfer types \u2014 by our factory-trained engineer. Do you have a quick minute?",
+      "timestamp": "2026-09-14T05:24:21.256152Z"
+    },
+    {
+      "role": "user",
+      "content": "Hello, data, and all.  I see, where are you based in exactly? Where do you operate from? Where do you have your offices and all?",
+      "timestamp": "2026-09-14T05:24:37.485898Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Just a moment, let me check that for you.",
+      "timestamp": "2026-09-14T05:24:40.054153Z"
+    },
+    {
+      "role": "assistant",
+      "content": "I\u2019m Spark, an AI sales representative calling from Smart Chip Tree. We have offices in Delhi, Noida, Bangalore and Pune, with our headquarters in Delhi. Are you exploring options for an employee ID program?",
+      "timestamp": "2026-09-14T05:24:47.435439Z"
+    },
+    {
+      "role": "user",
+      "content": "Okay, but can you deliver to like Kashmir, are you AI or are you a person?  Yes, perfect.",
+      "timestamp": "2026-09-14T05:25:13.937684Z"
+    },
+    {
+      "role": "assistant",
+      "content": "One moment please.",
+      "timestamp": "2026-09-14T05:25:16.496841Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Yes, we offer PAN India service, including Kashmir. Would you like to speak with a specialist about tailoring a solution for your needs?",
+      "timestamp": "2026-09-14T05:25:18.766956Z"
+    },
+    {
+      "role": "user",
+      "content": "I think.  I.  Yeah, that would work.  Yes, perfect.",
+      "timestamp": "2026-09-14T05:25:41.281072Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Okay, let me see.",
+      "timestamp": "2026-09-14T05:25:43.854279Z"
+    }
+  ]
+}
