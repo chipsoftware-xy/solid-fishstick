@@ -8,13 +8,13 @@ llm:
   stall_threshold_seconds: 2.5
   stall_phrase: Just a moment, let me check that for you.
   deepinfra:
-    api_key: YBaVB3PbbrMbKcNG38qrHet7giAicPEP
+    api_key: 
     model: google/gemma-3-4b-it
 stt:
   model: base
   low_confidence_threshold: -1.1
   deepinfra:
-    api_key: TmmTU7snLfe07GX2ZAJYWwEfnDdPXpQJ
+    api_key: 
     model: openai/whisper-large-v3-turbo
 
 tts:
@@ -42,8 +42,8 @@ audio:
   vad_min_rms: 150
   vad_max_utterance_ms: 20000
 exotel:
-  api_key: c43835fc92157d4037c19b063ea1d6ce5932659b7ae6a306
-  api_token: 1fa1e01bde7f7f5737092e375235023d616014bf2f65602b
+  api_key: 
+  api_token: 
   account_sid: proton184
   exophone: 01141189593
   flow_id: '1339542'
